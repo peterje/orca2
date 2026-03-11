@@ -46,7 +46,6 @@ export const NormalizedIssueSchema = Schema.Struct({
   linkedPullRequests: Schema.Array(LinkedPullRequestRefSchema),
   blockers: Schema.Array(BlockerRefSchema),
   normalizedState: NormalizedStateSchema,
-  runnable: Schema.Boolean,
 })
 
 export type NormalizedIssue = Schema.Schema.Type<typeof NormalizedIssueSchema>

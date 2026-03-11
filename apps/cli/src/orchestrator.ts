@@ -32,7 +32,7 @@ export const selectRunnableIssue = (
   issues: RuntimeSnapshot["activeIssues"],
 ): SelectedRunnableIssue | null => {
   const runnableIssues = issues
-    .filter((issue) => issue.runnable)
+    .filter((issue) => issue.normalizedState === "runnable")
     .sort(compareIssues)
   const selectedIssue = runnableIssues[0]
 
@@ -99,7 +99,18 @@ export const runOrchestrator = ({
     )
 
     while (true) {
+      const pollStartedAt = Date.now()
       yield* pollOnce
-      yield* Effect.sleep(Duration.millis(config.polling.intervalMs))
+
+      const elapsedMs = Date.now() - pollStartedAt
+      const remainingDelayMs = Math.max(
+        config.polling.intervalMs - elapsedMs,
+        0,
+      )
+
+      // Keep the configured interval close to the time between poll starts.
+      if (remainingDelayMs > 0) {
+        yield* Effect.sleep(Duration.millis(remainingDelayMs))
+      }
     }
   })

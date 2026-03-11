@@ -73,7 +73,6 @@ describe("linear normalization", () => {
       },
     ])
     expect(issues[0]?.normalizedState).toBe("linked-pr-detected")
-    expect(issues[0]?.runnable).toBe(false)
   })
 
   it("prefers a later non-null pull request title when deduplicating", async () => {
@@ -213,7 +212,6 @@ describe("linear normalization", () => {
     const issues = normalizeActiveIssues(decoded, ["Done", "Canceled"])
 
     expect(issues[0]?.normalizedState).toBe("terminal")
-    expect(issues[0]?.runnable).toBe(false)
   })
 
   it("treats cancelled state types as terminal even when not configured by name", async () => {
@@ -256,7 +254,6 @@ describe("linear normalization", () => {
     const issues = normalizeActiveIssues(decoded, ["Done"])
 
     expect(issues[0]?.normalizedState).toBe("terminal")
-    expect(issues[0]?.runnable).toBe(false)
   })
 
   it("selects a single runnable issue by priority, age, and identifier", async () => {

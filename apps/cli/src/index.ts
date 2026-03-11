@@ -3,9 +3,8 @@ import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { Command, Flag } from "effect/unstable/cli"
 import { formatErrorMessage } from "./error-format"
-import { writeLogLine } from "./logging"
+import { appLogLevels, writeLogLine } from "./logging"
 import { runOrchestrator } from "./orchestrator"
-import { appLogLevels } from "./logging"
 import { loadOrcaConfig } from "./orca-config"
 
 const logLevelFlag = Flag.choiceWithValue(

@@ -8,7 +8,8 @@ export class ConfigLoadError extends Data.TaggedError("ConfigLoadError")<{
 }> {}
 
 const requiredEnvVar = (name: string) =>
-  Schema.String.annotate({
+  Schema.NonEmptyString.annotate({
+    identifier: name,
     message: `${name} environment variable must be set`,
   })
 

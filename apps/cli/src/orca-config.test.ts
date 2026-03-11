@@ -88,6 +88,26 @@ describe("orca config", () => {
     expect(String(failure.issue)).toContain("LINEAR_API_KEY")
   })
 
+  it("rejects empty required env vars with a schema-backed error", async () => {
+    const failure = await Effect.runPromise(
+      Effect.flip(
+        decodeOrcaConfig({
+          ...validConfig,
+          github: {
+            ...validConfig.github,
+            token: "",
+          },
+        }),
+      ),
+    )
+
+    expect(Schema.isSchemaError(failure)).toBe(true)
+    if (!Schema.isSchemaError(failure)) {
+      throw failure
+    }
+    expect(String(failure.issue)).toContain("GITHUB_TOKEN")
+  })
+
   it("loads a ts config file from disk", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "orca-config-"))
     tempDirectories.add(directory)

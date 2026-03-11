@@ -240,7 +240,6 @@ export const normalizeActiveIssues = (
       linkedPullRequests,
       blockers: [], // TODO: populate blockers once dependency discovery lands.
       normalizedState,
-      runnable,
     }
   })
 }

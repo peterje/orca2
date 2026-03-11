@@ -192,7 +192,7 @@ export const normalizeActiveIssues = (
       stateType: issue.state.type,
       labels: issue.labels.nodes.map((label) => label.name).sort(),
       linkedPullRequests,
-      blockers: [],
+      blockers: [], // TODO: populate blockers once dependency discovery lands.
       normalizedState,
       runnable,
     }

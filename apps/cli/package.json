@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "dev": "bun run src/bin.ts",
+    "test": "bun test",
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsdown"
   },

@@ -1,4 +1,4 @@
-import { Duration, Effect, SubscriptionRef } from "effect"
+import { Cause, Duration, Effect, SubscriptionRef } from "effect"
 import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
 import { formatErrorMessage } from "./error-format"
 import { fetchActiveIssues } from "./linear"
@@ -85,9 +85,9 @@ export const runOrchestrator = ({
       Effect.map(buildRuntimeSnapshot),
       Effect.tap((snapshot) => SubscriptionRef.set(snapshotRef, snapshot)),
       Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
-      Effect.catch((error: unknown) =>
+      Effect.catchCause((cause: Cause.Cause<unknown>) =>
         log(logLevel, "Error", "orca.linear.poll.failed", {
-          message: formatErrorMessage(error),
+          message: formatErrorMessage(Cause.squash(cause)),
         }),
       ),
     )

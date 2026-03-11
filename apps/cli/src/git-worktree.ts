@@ -124,7 +124,9 @@ export const sanitizeIssueIdentifier = (identifier: string) =>
     .replace(/^-+|-+$/g, "")
 
 export const resolveIssueBranchName = (issue: NormalizedIssue) =>
-  issue.branchName?.trim() || sanitizeIssueIdentifier(issue.identifier)
+  issue.branchName?.trim()
+    ? sanitizeIssueIdentifier(issue.branchName)
+    : sanitizeIssueIdentifier(issue.identifier)
 
 export const ensureIssueWorktree = ({
   config,

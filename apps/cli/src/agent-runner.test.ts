@@ -1,6 +1,9 @@
 import { Effect } from "effect"
 import { describe, expect, it } from "bun:test"
-import { runOpencodeAgent } from "./agent-runner"
+import {
+  opencodeStartupTimeoutPrefix,
+  runOpencodeAgent,
+} from "./agent-runner"
 
 const baseConfig = {
   agent: {
@@ -52,7 +55,7 @@ describe("agent runner", () => {
         runOpencodeAgent({
           config: baseConfig,
           createServer: async () => {
-            throw new Error("Timeout waiting for server to start after 50ms")
+            throw new Error(`${opencodeStartupTimeoutPrefix}50ms`)
           },
           cwd: "/repo",
           prompt: "say hello",
@@ -103,6 +106,48 @@ describe("agent runner", () => {
     expect(failure.reason).toBe("response-error")
     expect(failure.retryable).toBe(false)
     expect(failure.message).toContain("ProviderAuthError")
+  })
+
+  it("maps a hanging session create to a retryable turn timeout", async () => {
+    let promptCalled = false
+
+    const failure = await Effect.runPromise(
+      Effect.flip(
+        runOpencodeAgent({
+          config: {
+            ...baseConfig,
+            opencode: {
+              ...baseConfig.opencode,
+              turnTimeoutMs: 75,
+            },
+          },
+          createClient: () => ({
+            session: {
+              create: async () => new Promise(() => {}),
+              prompt: async () => {
+                promptCalled = true
+                return {
+                  data: {
+                    info: {},
+                  },
+                }
+              },
+            },
+          }),
+          createServer: async () => ({
+            close() {},
+            url: "http://127.0.0.1:4096",
+          }),
+          cwd: "/repo",
+          prompt: "say hello",
+        }),
+      ),
+    )
+
+    expect(failure.reason).toBe("turn-timeout")
+    expect(failure.retryable).toBe(true)
+    expect(failure.message).toBe("opencode session create timed out")
+    expect(promptCalled).toBe(false)
   })
 
   it("maps an overlong prompt to a retryable turn timeout", async () => {

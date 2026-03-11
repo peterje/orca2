@@ -5,7 +5,10 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { ensureIssueWorktree } from "./git-worktree"
+import {
+  ensureIssueWorktree,
+  resolveIssueBranchName,
+} from "./git-worktree"
 
 const execFileAsync = promisify(execFile)
 const tempDirectories = new Set<string>()
@@ -59,6 +62,15 @@ const issue = {
 }
 
 describe("git worktree", () => {
+  it("sanitizes Linear-provided branch names before passing them to git", () => {
+    expect(
+      resolveIssueBranchName({
+        ...issue,
+        branchName: "feat: PET-47 run implementation",
+      }),
+    ).toBe("feat-pet-47-run-implementation")
+  })
+
   it("creates and then reuses an issue worktree", async () => {
     const repoRoot = await createRepository()
     const worktreeRoot = path.join(repoRoot, ".orca", "worktrees")

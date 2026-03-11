@@ -21,6 +21,9 @@ export class AgentRunnerError extends Data.TaggedError("AgentRunnerError")<{
   readonly retryable: boolean
 }> {}
 
+export const opencodeStartupTimeoutPrefix =
+  "Timeout waiting for server to start after "
+
 type OpencodeConfig = Pick<OrcaConfig, "agent" | "opencode">
 
 type CreateSessionResponse = {
@@ -148,7 +151,7 @@ const startupFailure = (cause: unknown) => {
   return new AgentRunnerError({
     diagnostics: diagnosticsFrom(cause),
     message,
-    reason: message.includes("Timeout waiting for server to start")
+    reason: message.startsWith(opencodeStartupTimeoutPrefix)
       ? "startup-timeout"
       : "process-exited",
     retryable: true,
@@ -220,7 +223,20 @@ export const runOpencodeAgent = ({
             const createdSession = yield* Effect.tryPromise({
               try: () => client.session.create({ throwOnError: true }),
               catch: (cause) => responseFailure(cause, true),
-            })
+            }).pipe(
+              Effect.timeoutOrElse({
+                duration: config.opencode.turnTimeoutMs,
+                onTimeout: () =>
+                  Effect.fail(
+                    new AgentRunnerError({
+                      diagnostics: [],
+                      message: "opencode session create timed out",
+                      reason: "turn-timeout",
+                      retryable: true,
+                    }),
+                  ),
+              }),
+            )
 
             const sessionId = createdSession.data?.id
             if (typeof sessionId !== "string" || sessionId.length === 0) {

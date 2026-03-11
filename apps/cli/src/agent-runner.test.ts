@@ -6,6 +6,7 @@ import path from "node:path"
 import { runCodexAgent } from "./agent-runner"
 
 const tempDirectories = new Set<string>()
+const bunExecutable = Bun.which("bun") ?? process.execPath
 
 afterEach(async () => {
   await Promise.all(
@@ -78,7 +79,7 @@ describe("agent runner", () => {
             },
             codex: {
               args: [scriptPath],
-              executable: process.execPath,
+              executable: bunExecutable,
               readTimeoutMs: 50,
               stallTimeoutMs: 1_000,
               turnTimeoutMs: 1_000,
@@ -128,7 +129,7 @@ input.on("line", (line) => {
             },
             codex: {
               args: [scriptPath],
-              executable: process.execPath,
+              executable: bunExecutable,
               readTimeoutMs: 100,
               stallTimeoutMs: 75,
               turnTimeoutMs: 1_000,
@@ -181,7 +182,7 @@ input.on("line", (line) => {
             },
             codex: {
               args: [scriptPath],
-              executable: process.execPath,
+              executable: bunExecutable,
               readTimeoutMs: 100,
               stallTimeoutMs: 1_000,
               turnTimeoutMs: 75,

@@ -35,10 +35,10 @@ export const log = (
     }
 
     const line = JSON.stringify({
+      ...fields,
       timestamp: new Date().toISOString(),
       level: messageLevel,
       event,
-      ...fields,
     })
 
     if (messageLevel === "Fatal" || messageLevel === "Error") {

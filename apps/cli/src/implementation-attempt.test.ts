@@ -71,11 +71,8 @@ const baseConfig = {
     maxRetryBackoffMs: 300_000,
     maxTurns: 1,
   },
-  codex: {
-    args: [] as Array<string>,
-    executable: process.execPath,
-    readTimeoutMs: 100,
-    stallTimeoutMs: 1_000,
+  opencode: {
+    startupTimeoutMs: 100,
     turnTimeoutMs: 1_000,
   },
   github: {
@@ -115,37 +112,6 @@ describe("implementation attempt", () => {
     const repoRoot = await createRepository()
     const cwdOutputPath = path.join(repoRoot, "cwd.txt")
     const worktreeRoot = path.join(repoRoot, ".orca", "worktrees")
-    const agentScriptPath = path.join(repoRoot, "fake-agent.js")
-
-    await writeFile(
-      agentScriptPath,
-      `
-const fs = require("node:fs")
-const readline = require("node:readline")
-
-const outputPath = process.argv[2]
-const input = readline.createInterface({ input: process.stdin })
-
-input.on("line", (line) => {
-  const message = JSON.parse(line)
-  if (message.method === "initialize") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n")
-    return
-  }
-
-  if (message.method === "thread/start") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { thread: { id: "thr_1" } } }) + "\\n")
-    return
-  }
-
-  if (message.method === "turn/start") {
-    fs.writeFileSync(outputPath, process.cwd())
-    process.stdout.write(JSON.stringify({ id: message.id, result: { turn: { id: "turn_1" } } }) + "\\n")
-    process.stdout.write(JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn_1", status: "completed" } } }) + "\\n")
-  }
-})
-`,
-    )
 
     let sleepCalls = 0
 
@@ -153,10 +119,6 @@ input.on("line", (line) => {
       runImplementationAttempt({
         config: {
           ...baseConfig,
-          codex: {
-            ...baseConfig.codex,
-            args: [agentScriptPath, cwdOutputPath],
-          },
           worktree: {
             repoRoot,
             root: worktreeRoot,
@@ -177,6 +139,8 @@ input.on("line", (line) => {
           }),
         issue,
         refreshIssues: () => Effect.succeed([issue]),
+        runAgent: ({ cwd }) =>
+          Effect.tryPromise(() => writeFile(cwdOutputPath, cwd)),
         sleep: (durationMs) =>
           Effect.sync(() => {
             sleepCalls += 1

@@ -132,12 +132,9 @@ export default {
     maxTurns: 12,
     maxRetryBackoffMs: 300_000
   },
-  codex: {
-    executable: "codex",
-    args: ["app-server"],
-    turnTimeoutMs: 3_600_000,
-    readTimeoutMs: 5_000,
-    stallTimeoutMs: 300_000
+  opencode: {
+    startupTimeoutMs: 5_000,
+    turnTimeoutMs: 3_600_000
   },
   greptile: {
     enabled: true,
@@ -470,24 +467,25 @@ Recommended operator actions:
 
 ## 13. Agent Runner
 
-The default agent transport is the Codex app-server over stdio.
+The default agent transport is the OpenCode SDK against a local OpenCode server.
 
 Required behavior:
 
+- start a local OpenCode server through the SDK
 - run in the issue worktree as cwd
-- stream stdout protocol messages
-- treat stderr as diagnostics
-- enforce read timeout, stall timeout, and total turn timeout
-- stop after `agent.maxTurns`
-- require a successful startup handshake or readiness signal within `codex.readTimeoutMs`
-- treat malformed stdout protocol payloads as agent protocol failures
+- scope the SDK client to the issue worktree directory
+- create a session and send the implementation prompt through the typed session API
+- enforce startup timeout and total turn timeout
+- configure the default build agent with `maxSteps = agent.maxTurns`
+- treat missing required SDK response fields as agent protocol failures
 
 Error mapping:
 
 - startup timeout -> retryable agent failure
-- stall timeout -> retryable agent failure
 - total turn timeout -> retryable agent failure
-- repeated malformed protocol payloads for the same issue -> `ManualIntervention`
+- local server startup failure -> retryable agent failure
+- assistant/provider response error -> agent failure, retryable only when the SDK error indicates it is safe to retry
+- repeated malformed SDK payloads for the same issue -> `ManualIntervention`
 
 ## 14. Observability
 
@@ -618,4 +616,3 @@ Deliberately omitted:
 ## 19. Naming
 
 The application name is `Orca`.
-

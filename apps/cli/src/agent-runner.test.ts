@@ -1,57 +1,40 @@
 import { Effect } from "effect"
-import { afterEach, describe, expect, it } from "bun:test"
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import path from "node:path"
-import { runCodexAgent } from "./agent-runner"
+import { describe, expect, it } from "bun:test"
+import { runOpencodeAgent } from "./agent-runner"
 
-const tempDirectories = new Set<string>()
-const bunExecutable = Bun.which("bun") ?? process.execPath
-
-afterEach(async () => {
-  await Promise.all(
-    [...tempDirectories].map(async (directory) => {
-      await rm(directory, { force: true, recursive: true })
-      tempDirectories.delete(directory)
-    }),
-  )
-})
-
-const writeAgentScript = async (contents: string) => {
-  const directory = await mkdtemp(path.join(tmpdir(), "orca-agent-runner-"))
-  tempDirectories.add(directory)
-
-  const scriptPath = path.join(directory, "agent.js")
-  await writeFile(scriptPath, contents)
-
-  return {
-    cwd: directory,
-    scriptPath,
-  }
-}
+const baseConfig = {
+  agent: {
+    maxRetryBackoffMs: 1_000,
+    maxTurns: 1,
+  },
+  opencode: {
+    startupTimeoutMs: 50,
+    turnTimeoutMs: 1_000,
+  },
+} as const
 
 describe("agent runner", () => {
-  it("rejects invalid maxTurns before spawning the agent process", async () => {
-    const { cwd } = await writeAgentScript(`setInterval(() => {}, 1000)\n`)
-    const missingExecutable = path.join(cwd, "missing-agent")
+  it("rejects invalid maxTurns before creating an opencode server", async () => {
+    let serverStarted = false
 
     const failure = await Effect.runPromise(
       Effect.flip(
-        runCodexAgent({
+        runOpencodeAgent({
           config: {
+            ...baseConfig,
             agent: {
-              maxRetryBackoffMs: 1_000,
+              ...baseConfig.agent,
               maxTurns: 0,
             },
-            codex: {
-              args: [],
-              executable: missingExecutable,
-              readTimeoutMs: 50,
-              stallTimeoutMs: 1_000,
-              turnTimeoutMs: 1_000,
-            },
           },
-          cwd,
+          createServer: async () => {
+            serverStarted = true
+            return {
+              close() {},
+              url: "http://127.0.0.1:4096",
+            }
+          },
+          cwd: "/repo",
           prompt: "say hello",
         }),
       ),
@@ -60,32 +43,18 @@ describe("agent runner", () => {
     expect(failure.message).toBe("agent.maxTurns must be at least 1")
     expect(failure.reason).toBe("protocol-error")
     expect(failure.retryable).toBe(false)
-
-    await expect(access(missingExecutable)).rejects.toThrow()
+    expect(serverStarted).toBe(false)
   })
 
-  it("maps a missing startup handshake to a retryable startup timeout", async () => {
-    const { cwd, scriptPath } = await writeAgentScript(
-      `setInterval(() => {}, 1000)\n`,
-    )
-
+  it("maps a server startup timeout to a retryable startup timeout", async () => {
     const failure = await Effect.runPromise(
       Effect.flip(
-        runCodexAgent({
-          config: {
-            agent: {
-              maxRetryBackoffMs: 1_000,
-              maxTurns: 1,
-            },
-            codex: {
-              args: [scriptPath],
-              executable: bunExecutable,
-              readTimeoutMs: 50,
-              stallTimeoutMs: 1_000,
-              turnTimeoutMs: 1_000,
-            },
+        runOpencodeAgent({
+          config: baseConfig,
+          createServer: async () => {
+            throw new Error("Timeout waiting for server to start after 50ms")
           },
-          cwd,
+          cwd: "/repo",
           prompt: "say hello",
         }),
       ),
@@ -95,100 +64,77 @@ describe("agent runner", () => {
     expect(failure.retryable).toBe(true)
   })
 
-  it("maps stalled output to a retryable stall timeout", async () => {
-    const { cwd, scriptPath } = await writeAgentScript(`
-const readline = require("node:readline")
-
-const input = readline.createInterface({ input: process.stdin })
-
-input.on("line", (line) => {
-  const message = JSON.parse(line)
-  if (message.method === "initialize") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n")
-    return
-  }
-
-  if (message.method === "thread/start") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { thread: { id: "thr_1" } } }) + "\\n")
-    return
-  }
-
-  if (message.method === "turn/start") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { turn: { id: "turn_1" } } }) + "\\n")
-  }
-})
-`)
-
+  it("maps assistant message errors to response errors", async () => {
     const failure = await Effect.runPromise(
       Effect.flip(
-        runCodexAgent({
-          config: {
-            agent: {
-              maxRetryBackoffMs: 1_000,
-              maxTurns: 1,
+        runOpencodeAgent({
+          config: baseConfig,
+          createClient: () => ({
+            session: {
+              create: async () => ({
+                data: {
+                  id: "ses_123",
+                },
+              }),
+              prompt: async () => ({
+                data: {
+                  info: {
+                    error: {
+                      data: {
+                        message: "missing provider token",
+                      },
+                      name: "ProviderAuthError",
+                    },
+                  },
+                },
+              }),
             },
-            codex: {
-              args: [scriptPath],
-              executable: bunExecutable,
-              readTimeoutMs: 100,
-              stallTimeoutMs: 75,
-              turnTimeoutMs: 1_000,
-            },
-          },
-          cwd,
+          }),
+          createServer: async () => ({
+            close() {},
+            url: "http://127.0.0.1:4096",
+          }),
+          cwd: "/repo",
           prompt: "say hello",
         }),
       ),
     )
 
-    expect(failure.reason).toBe("stall-timeout")
-    expect(failure.retryable).toBe(true)
+    expect(failure.reason).toBe("response-error")
+    expect(failure.retryable).toBe(false)
+    expect(failure.message).toContain("ProviderAuthError")
   })
 
-  it("maps an overlong turn to a retryable turn timeout", async () => {
-    const { cwd, scriptPath } = await writeAgentScript(`
-const readline = require("node:readline")
-
-const input = readline.createInterface({ input: process.stdin })
-
-input.on("line", (line) => {
-  const message = JSON.parse(line)
-  if (message.method === "initialize") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n")
-    return
-  }
-
-  if (message.method === "thread/start") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { thread: { id: "thr_1" } } }) + "\\n")
-    return
-  }
-
-  if (message.method === "turn/start") {
-    process.stdout.write(JSON.stringify({ id: message.id, result: { turn: { id: "turn_1" } } }) + "\\n")
-    setInterval(() => {
-      process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "." } }) + "\\n")
-    }, 10)
-  }
-})
-`)
+  it("maps an overlong prompt to a retryable turn timeout", async () => {
+    let serverClosed = false
 
     const failure = await Effect.runPromise(
       Effect.flip(
-        runCodexAgent({
+        runOpencodeAgent({
           config: {
-            agent: {
-              maxRetryBackoffMs: 1_000,
-              maxTurns: 1,
-            },
-            codex: {
-              args: [scriptPath],
-              executable: bunExecutable,
-              readTimeoutMs: 100,
-              stallTimeoutMs: 1_000,
+            ...baseConfig,
+            opencode: {
+              ...baseConfig.opencode,
               turnTimeoutMs: 75,
             },
           },
-          cwd,
+          createClient: () => ({
+            session: {
+              create: async () => ({
+                data: {
+                  id: "ses_123",
+                },
+              }),
+              prompt: async () => new Promise(() => {}),
+            },
+          }),
+          createServer: async () => ({
+            close() {
+              serverClosed = true
+            },
+            url: "http://127.0.0.1:4096",
+          }),
+          cwd: "/repo",
           prompt: "say hello",
         }),
       ),
@@ -196,5 +142,6 @@ input.on("line", (line) => {
 
     expect(failure.reason).toBe("turn-timeout")
     expect(failure.retryable).toBe(true)
+    expect(serverClosed).toBe(true)
   })
 })

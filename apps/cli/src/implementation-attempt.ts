@@ -1,7 +1,7 @@
 import { Duration, Effect } from "effect"
 import type { NormalizedIssue } from "./domain"
 import { AgentRunnerError } from "./agent-runner"
-import { runCodexAgent } from "./agent-runner"
+import { runOpencodeAgent } from "./agent-runner"
 import type { WorktreeHandle } from "./git-worktree"
 import { WorktreeError, ensureIssueWorktree } from "./git-worktree"
 import { fetchActiveIssues } from "./linear"
@@ -32,7 +32,7 @@ export const runImplementationAttempt = ({
     readonly cwd: string
     readonly prompt: string
   }) =>
-    runCodexAgent({
+    runOpencodeAgent({
       config,
       cwd,
       prompt,

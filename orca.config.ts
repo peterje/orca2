@@ -24,12 +24,9 @@ export default {
     maxTurns: 12,
     maxRetryBackoffMs: 300_000,
   },
-  codex: {
-    executable: "codex",
-    args: ["app-server"],
+  opencode: {
+    startupTimeoutMs: 5_000,
     turnTimeoutMs: 3_600_000,
-    readTimeoutMs: 5_000,
-    stallTimeoutMs: 300_000,
   },
   greptile: {
     enabled: true,

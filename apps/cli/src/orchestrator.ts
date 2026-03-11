@@ -1,4 +1,4 @@
-import { Cause, Duration, Effect, SubscriptionRef } from "effect"
+import { Cause, Duration, Effect, Ref } from "effect"
 import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
 import { formatErrorMessage } from "./error-format"
 import { fetchActiveIssues } from "./linear"
@@ -15,8 +15,12 @@ const compareIssues = (
     return priorityDifference
   }
 
+  const leftCreatedAtTime = new Date(left.createdAt).getTime()
+  const rightCreatedAtTime = new Date(right.createdAt).getTime()
   const createdAtDifference =
-    new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
+    Number.isFinite(leftCreatedAtTime) && Number.isFinite(rightCreatedAtTime)
+      ? leftCreatedAtTime - rightCreatedAtTime
+      : 0
   if (createdAtDifference !== 0) {
     return createdAtDifference
   }
@@ -69,7 +73,7 @@ export const runOrchestrator = ({
   readonly logLevel: AppLogLevel
 }) =>
   Effect.gen(function* () {
-    const snapshotRef = yield* SubscriptionRef.make<RuntimeSnapshot>({
+    const snapshotRef = yield* Ref.make<RuntimeSnapshot>({
       updatedAt: new Date(0).toISOString(),
       activeIssues: [],
       runnableIssue: null,
@@ -83,7 +87,7 @@ export const runOrchestrator = ({
 
     const pollOnce = fetchActiveIssues(config.linear).pipe(
       Effect.map(buildRuntimeSnapshot),
-      Effect.tap((snapshot) => SubscriptionRef.set(snapshotRef, snapshot)),
+      Effect.tap((snapshot) => Ref.set(snapshotRef, snapshot)),
       Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
       Effect.catchCause((cause: Cause.Cause<unknown>) =>
         log(logLevel, "Error", "orca.linear.poll.failed", {

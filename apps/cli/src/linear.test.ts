@@ -230,4 +230,69 @@ describe("linear normalization", () => {
       "PET-48",
     ])
   })
+
+  it("falls back to identifier ordering when createdAt timestamps are invalid", async () => {
+    const decoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "issue-6",
+                identifier: "PET-51",
+                title: "invalid timestamp b",
+                description: null,
+                branchName: null,
+                priority: 1,
+                createdAt: "not-a-date",
+                updatedAt: "2026-03-11T13:05:00.000Z",
+                state: {
+                  id: "state-5",
+                  name: "Todo",
+                  type: "unstarted",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+              },
+              {
+                id: "issue-7",
+                identifier: "PET-50",
+                title: "invalid timestamp a",
+                description: null,
+                branchName: null,
+                priority: 1,
+                createdAt: "also-not-a-date",
+                updatedAt: "2026-03-11T13:00:00.000Z",
+                state: {
+                  id: "state-6",
+                  name: "Todo",
+                  type: "unstarted",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const snapshot = buildRuntimeSnapshot(
+      normalizeActiveIssues(decoded, ["Done", "Canceled"]),
+    )
+
+    expect(snapshot.activeIssues.map((issue) => issue.identifier)).toEqual([
+      "PET-50",
+      "PET-51",
+    ])
+    expect(snapshot.runnableIssue?.identifier).toBe("PET-50")
+  })
 })

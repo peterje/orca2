@@ -31,7 +31,7 @@ Confidence: 4/5
 <comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
   <diffHunk><![CDATA[
 @@ -0,0 +1,99 @@
-+import { Duration, Effect, SubscriptionRef } from "effect"
++import { Cause, Duration, Effect, SubscriptionRef } from "effect"
 +import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
 +import { formatErrorMessage } from "./error-format"
 +import { fetchActiveIssues } from "./linear"
@@ -107,38 +107,60 @@ Confidence: 4/5
 +      activeIssues: [],
 +      runnableIssue: null,
 +    })
-+
-+    yield* log(logLevel, "Info", "orca.boot.completed", {
-+      config_path: configPath,
-+      polling_interval_ms: config.polling.intervalMs,
-+      linear_project_slug: config.linear.projectSlug,
-+    })
-+
-+    const pollOnce = fetchActiveIssues(config.linear).pipe(
-+      Effect.map(buildRuntimeSnapshot),
-+      Effect.tap((snapshot) => SubscriptionRef.set(snapshotRef, snapshot)),
-+      Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
-+      Effect.catch((error: unknown) =>
-+        log(logLevel, "Error", "orca.linear.poll.failed", {
-+          message: formatErrorMessage(error),
-+        }),
-+      ),
-+    )
   ]]></diffHunk>
-  <lineNumber>93</lineNumber>
-  <body>**Polling loop is not resilient to defects**
+  <lineNumber>76</lineNumber>
+  <body>**`snapshotRef` is private and unexposed — `SubscriptionRef` adds no value here**
 
-`Effect.catch` only intercepts typed failures in the `E` channel. If any step inside `fetchActiveIssues` produces an Effect *defect* — an untyped exception such as an unexpected `null` access, an internal runtime error, or a network-layer panic that the HTTP client surfaces as an unchecked throw — the `Effect.catch` handler here will be bypassed entirely. The defect propagates straight through `yield* pollOnce` and terminates the orchestrator fiber with no `orca.linear.poll.failed` log entry and no possibility of continuing to poll.
+`snapshotRef` is created inside `runOrchestrator` and is never returned, yielded, or passed to any other effect. Because `runOrchestrator` is an infinite loop that never resolves, there is no way for external code to subscribe to or read the snapshot — making the pub/sub overhead of `SubscriptionRef` effectively unused. The ref is currently indistinguishable from a plain `Ref` at runtime.
 
-For a long-running daemon this means a single unexpected error silently kills the process. Wrapping the poll body with `Effect.catchAllCause` would catch both typed failures and defects, keeping the loop alive:
+If the intent is to expose the snapshot to future consumers (e.g., an HTTP status endpoint or an agent layer), `snapshotRef` needs to be part of the function's return type before the loop starts, or threaded through a service layer. Consider either:
 
-```ts
-Effect.catchAllCause((cause) =>
-  log(logLevel, "Error", "orca.linear.poll.failed", {
-    message: formatErrorMessage(Cause.squash(cause)),
-  }),
-),
-```</body>
+1. Returning `snapshotRef` via a separate channel (e.g., `Deferred` or a service) before entering the polling loop.
+2. Replacing with `Ref.make` until a subscriber actually exists, and leaving a `// TODO: switch to SubscriptionRef when X subscribes` comment to document the intent.
+
+Without one of these changes, the reactive subscription capability of `SubscriptionRef` is silently dormant.
+</body>
+</comment>
+<comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
+  <diffHunk><![CDATA[
+@@ -0,0 +1,99 @@
++import { Cause, Duration, Effect, SubscriptionRef } from "effect"
++import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
++import { formatErrorMessage } from "./error-format"
++import { fetchActiveIssues } from "./linear"
++import type { AppLogLevel } from "./logging"
++import { log } from "./logging"
++import type { OrcaConfig } from "./orca-config"
++
++const compareIssues = (
++  left: RuntimeSnapshot["activeIssues"][number],
++  right: RuntimeSnapshot["activeIssues"][number],
++) => {
++  const priorityDifference = left.priorityRank - right.priorityRank
++  if (priorityDifference !== 0) {
++    return priorityDifference
++  }
++
++  const createdAtDifference =
++    new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
++  if (createdAtDifference !== 0) {
+  ]]></diffHunk>
+  <lineNumber>20</lineNumber>
+  <body>**`new Date()` parse in sort comparator silently absorbs invalid dates**
+
+`new Date(invalidString).getTime()` returns `NaN`, and `NaN - NaN === NaN`. JavaScript's `Array.sort` treats a comparator returning `NaN` as `0` (equal), so the `createdAt` tiebreaker is silently dropped and falls through to the `localeCompare` identifier comparison. In practice Linear returns valid ISO 8601 timestamps, so this is low risk — but a runtime invariant violation (e.g., a corrupted response body that passes schema validation because `createdAt: Schema.String` only checks the type, not the format) would produce subtly wrong sort order without any error.
+
+Consider guarding with a non-`NaN` fallback:
+
+```suggestion
+  const leftTime = new Date(left.createdAt).getTime()
+  const rightTime = new Date(right.createdAt).getTime()
+  const createdAtDifference =
+    Number.isFinite(leftTime) && Number.isFinite(rightTime)
+      ? leftTime - rightTime
+      : 0
+```
+</body>
 </comment>
 
 ## General comments
@@ -147,19 +169,23 @@ Effect.catchAllCause((cause) =>
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR introduces the first end-to-end Orca tracer bullet: config loading with `Schema`-backed validation, a Linear GraphQL polling loop, PR-attachment normalization, and an in-memory `RuntimeSnapshot` maintained by the orchestrator. The implementation is well-structured and addresses previous review concerns — `Schema.decodeUnknownEffect` is now used throughout (replacing the `Effect.sync`/`decodeUnknownSync` defect-producing pattern), the `requiredEnvVar` annotation surfaces named env-var errors, and the `NormalizedStateSchema` now correctly includes `"terminal"` as a variant.
+This PR implements the first end-to-end Orca tracer bullet: it wires `orca.config.ts` schema validation, a Linear GraphQL polling loop, PR attachment normalization, and an in-memory `RuntimeSnapshot` orchestrator. All issues from the previous review round have been addressed — `Schema.decodeUnknownEffect` replaces the sync variant in both `orca-config.ts` and `linear.ts`, the `normalizedState` union now includes `"terminal"`, the `blockers: []` stub is annotated with a TODO, and the polling loop is hardened with `Effect.catchCause`.
 
-Key findings:
+**Key changes:**
+- `orca-config.ts` — `decodeOrcaConfig` uses `Schema.decodeUnknownEffect`; `requiredEnvVar` annotates missing env var fields with human-readable error messages naming the expected variable.
+- `linear.ts` — `decodeActiveIssuesResponse` returns a proper typed failure; `normalizeActiveIssues` correctly classifies issues into `runnable`, `linked-pr-detected`, and `terminal` states; GitHub PR URLs are extracted and deduplicated from Linear attachments.
+- `orchestrator.ts` — `Effect.catchCause` replaces `Effect.catch` on the poll body, making the loop resilient to both typed failures and defects; a `SubscriptionRef` snapshot is built and logged each poll cycle.
+- Three test files added covering config decode, Linear payload normalization, sort/selection logic, and error formatting.
 
-- **Polling loop resilience** (`apps/cli/src/orchestrator.ts`): `Effect.catch` only intercepts typed failures; any defect in the poll pipeline will crash the orchestrator fiber silently. `Effect.catchAllCause` is needed to keep the daemon alive across unexpected errors.
-- **Missing `test` script** (`apps/cli/package.json`): The `scripts` block has no `"test"` entry. `bun run check` + `bun run build` (the documented verification steps) never execute the test suite, so tests are invisible to CI.
-- **`blockers` stub** (`apps/cli/src/linear.ts`): `blockers` is permanently `[]` with no `// TODO` comment. Downstream issues (PET-47–PET-51) depend on this field; the silence makes it easy to forget it is unimplemented.
+**Minor observations:**
+- `snapshotRef` (`SubscriptionRef`) is written to inside `runOrchestrator` but is local and never returned or exposed — no external code can subscribe to it in the current implementation. The reactive capability of `SubscriptionRef` is dormant until the function signature is updated to surface the ref.
+- The verification steps (`bun run check`, `bun run build`) do not include `bun test`. Given the PR adds three test files that cover critical normalization and decode paths, explicitly running `bun test` before merge is recommended to confirm all assertions pass.
 
 <h3>Confidence Score: 4/5</h3>
 
-- Safe to merge with minor resilience and process improvements recommended before subsequent daemon-facing tickets land.
-- The core logic (schema decoding, issue normalization, priority selection) is correct and well-tested. Previous critical issues (Effect.sync/defect promotion, missing terminal state) have been resolved. The two remaining concerns — defect propagation crashing the polling loop, and missing test script — are real but non-blocking for this tracer-bullet stage.
-- `apps/cli/src/orchestrator.ts` (defect handling in poll loop) and `apps/cli/package.json` (missing test script).
+- Safe to merge with minor follow-up: the two style-level observations (unexposed SubscriptionRef and NaN-silent sort) do not affect correctness for the current tracer-bullet scope, and tests were not explicitly verified to pass.
+- All critical issues from the previous review round have been resolved. The remaining observations are style-level or low-probability edge cases. The only noteworthy gap is that `bun test` is absent from the listed verification steps, leaving a small uncertainty about whether the new test assertions pass cleanly.
+- apps/cli/src/orchestrator.ts — `snapshotRef` is never exposed; consider whether `SubscriptionRef` or plain `Ref` better communicates intent at this stage.
 
 <h3>Important Files Changed</h3>
 
@@ -168,11 +194,12 @@ Key findings:
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/linear.ts | GraphQL query, schema validation (now using `Schema.decodeUnknownEffect`), and issue normalization including the terminal/runnable/linked-pr-detected state machine. The `blockers` field is still a permanent stub (`[]`) with no TODO comment. |
-| apps/cli/src/orchestrator.ts | Infinite polling loop with priority-based issue selection. `Effect.catch` only intercepts typed failures — any defect in the poll pipeline will crash the fiber with no logged output and no recovery. |
-| apps/cli/src/orca-config.ts | Config loading now correctly uses `Schema.decodeUnknownEffect` and `requiredEnvVar` annotations produce human-readable error messages naming the missing env var. |
-| apps/cli/src/domain.ts | Domain schemas look correct. `NormalizedStateSchema` now includes `"terminal"` as a union member. `BlockerRefSchema` is defined but `blockers` is never populated at runtime. |
-| apps/cli/package.json | No `test` script defined — the existing Bun test suite cannot be run via `bun run test` and is absent from CI verification steps. |
+| apps/cli/src/orchestrator.ts | Polling loop now resilient via `Effect.catchCause`; `SubscriptionRef` created but never exposed or subscribed to — acts as plain `Ref` in the current codebase. |
+| apps/cli/src/linear.ts | Correctly uses `Schema.decodeUnknownEffect` (not the sync variant), adds a "terminal" normalizedState variant, and documents the `blockers: []` stub with a TODO comment. No new issues found. |
+| apps/cli/src/orca-config.ts | Config validation now uses `Schema.decodeUnknownEffect`; `requiredEnvVar` annotates missing env var fields with named messages. Implementation looks correct. |
+| apps/cli/src/domain.ts | Clean domain schema definitions for `NormalizedIssue`, `LinkedPullRequestRef`, `BlockerRef`, `SelectedRunnableIssue`, and `RuntimeSnapshot`; all three `normalizedState` variants are present. |
+| apps/cli/src/index.ts | CLI entry point wires config loading, orchestrator, and error formatting correctly. `Effect.catch` handles all typed failures from config load and orchestration. |
+| orca.config.ts | Root config file reads secrets from env vars; safe to commit. All required fields match the `OrcaConfigSchema` shape. |
 
 </details>
 
@@ -182,51 +209,44 @@ Key findings:
 
 ```mermaid
 sequenceDiagram
-    participant bin as bin.ts
-    participant idx as index.ts
-    participant cfg as orca-config.ts
-    participant orch as orchestrator.ts
-    participant lin as linear.ts
-    participant api as Linear GraphQL API
-    participant snap as SubscriptionRef[RuntimeSnapshot]
+    participant CLI as index.ts (CLI)
+    participant Config as orca-config.ts
+    participant Orch as orchestrator.ts
+    participant Linear as linear.ts
+    participant LinAPI as Linear GraphQL API
 
-    bin->>idx: run program
-    idx->>cfg: loadOrcaConfig(configPath)
-    cfg->>cfg: import(configPath) via pathToFileURL
-    cfg->>cfg: Schema.decodeUnknownEffect(OrcaConfigSchema)
-    cfg-->>idx: { config, resolvedPath }
-    idx->>orch: runOrchestrator({ config, configPath, logLevel })
-    orch->>snap: SubscriptionRef.make(emptySnapshot)
-    orch->>orch: log orca.boot.completed
+    CLI->>Config: loadOrcaConfig(configPath)
+    Config->>Config: import(orca.config.ts)
+    Config->>Config: Schema.decodeUnknownEffect(OrcaConfigSchema)
+    Config-->>CLI: { config, resolvedPath }
+
+    CLI->>Orch: runOrchestrator({ config, configPath, logLevel })
+    Orch->>Orch: SubscriptionRef.make(initialSnapshot)
+    Orch->>Orch: log(orca.boot.completed)
 
     loop every intervalMs
-        orch->>lin: fetchActiveIssues(config.linear)
-        lin->>api: POST /graphql (ActiveIssues query)
-        api-->>lin: JSON payload
-        lin->>lin: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
-        lin->>lin: normalizeActiveIssues → LinkedPRs, normalizedState
-        lin-->>orch: NormalizedIssue[]
-        orch->>orch: buildRuntimeSnapshot (sort + selectRunnableIssue)
-        orch->>snap: SubscriptionRef.set(snapshot)
-        orch->>orch: log orca.snapshot.updated
-        orch->>orch: Effect.sleep(intervalMs)
+        Orch->>Linear: fetchActiveIssues(config.linear)
+        Linear->>LinAPI: POST /graphql (ActiveIssues query)
+        LinAPI-->>Linear: JSON response
+        Linear->>Linear: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
+        Linear->>Linear: normalizeActiveIssues(payload, terminalStates)
+        Linear-->>Orch: NormalizedIssue[]
+
+        Orch->>Orch: buildRuntimeSnapshot(issues)
+        Orch->>Orch: SubscriptionRef.set(snapshotRef, snapshot)
+        Orch->>Orch: log(orca.snapshot.updated)
+
+        alt fetch or decode error
+            Orch->>Orch: catchCause → log(orca.linear.poll.failed)
+        end
+
+        Orch->>Orch: Effect.sleep(intervalMs)
     end
 ```
 
-<!-- greptile_failed_comments -->
-<details><summary><h3>Comments Outside Diff (1)</h3></summary>
+<!-- greptile_other_comments_section -->
 
-1. `apps/cli/package.json`, line 17-20 ([link](https://github.com/peterje/orca2/blob/071a7de4e76644a9bef267ad204cff6ee603e001/apps/cli/package.json#L17-L20)) 
-
-   **No `test` script wired into package scripts**
-
-   The PR ships four test files (`linear.test.ts`, `orca-config.test.ts`, `error-format.test.ts`), but `package.json` has no `"test"` script. The PR verification steps only list `bun run check` and `bun run build` — neither of which executes the test suite. Any CI pipeline that relies on `bun run test` will silently skip all tests.
-
-</details>
-
-<!-- /greptile_failed_comments -->
-
-<sub>Last reviewed commit: 071a7de</sub></body>
+<sub>Last reviewed commit: 2ea59ee</sub></body>
   </comment>
 </comments>
 

@@ -90,9 +90,11 @@ export const runOrchestrator = ({
       Effect.tap((snapshot) => Ref.set(snapshotRef, snapshot)),
       Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
       Effect.catchCause((cause: Cause.Cause<unknown>) =>
-        log(logLevel, "Error", "orca.linear.poll.failed", {
-          message: formatErrorMessage(Cause.squash(cause)),
-        }),
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : log(logLevel, "Error", "orca.linear.poll.failed", {
+              message: formatErrorMessage(Cause.squash(cause)),
+            }),
       ),
     )
 

@@ -24,7 +24,128 @@ Build the first end-to-end Orca tracer bullet: start from `orca.config.ts`, vali
 
 # Greptile review
 
-Confidence: 4/5
+Confidence: 3/5
+
+## Unresolved review threads
+
+<comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
+  <diffHunk><![CDATA[
+@@ -0,0 +1,103 @@
++import { Cause, Duration, Effect, Ref } from "effect"
++import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
++import { formatErrorMessage } from "./error-format"
++import { fetchActiveIssues } from "./linear"
++import type { AppLogLevel } from "./logging"
++import { log } from "./logging"
++import type { OrcaConfig } from "./orca-config"
++
++const compareIssues = (
++  left: RuntimeSnapshot["activeIssues"][number],
++  right: RuntimeSnapshot["activeIssues"][number],
++) => {
++  const priorityDifference = left.priorityRank - right.priorityRank
++  if (priorityDifference !== 0) {
++    return priorityDifference
++  }
++
++  const leftCreatedAtTime = new Date(left.createdAt).getTime()
++  const rightCreatedAtTime = new Date(right.createdAt).getTime()
++  const createdAtDifference =
++    Number.isFinite(leftCreatedAtTime) && Number.isFinite(rightCreatedAtTime)
++      ? leftCreatedAtTime - rightCreatedAtTime
++      : 0
++  if (createdAtDifference !== 0) {
++    return createdAtDifference
++  }
++
++  return left.identifier.localeCompare(right.identifier)
++}
++
++export const selectRunnableIssue = (
++  issues: RuntimeSnapshot["activeIssues"],
++): SelectedRunnableIssue | null => {
++  const runnableIssues = issues
++    .filter((issue) => issue.runnable)
++    .sort(compareIssues)
++  const selectedIssue = runnableIssues[0]
++
++  if (!selectedIssue) {
++    return null
++  }
++
++  return {
++    id: selectedIssue.id,
++    identifier: selectedIssue.identifier,
++    title: selectedIssue.title,
++    normalizedState: "runnable",
++  }
++}
++
++export const buildRuntimeSnapshot = (
++  issues: RuntimeSnapshot["activeIssues"],
++): RuntimeSnapshot => ({
++  updatedAt: new Date().toISOString(),
++  activeIssues: [...issues].sort(compareIssues),
++  runnableIssue: selectRunnableIssue(issues),
++})
++
++const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
++  log(minimumLogLevel, "Info", "orca.snapshot.updated", {
++    active_issue_count: snapshot.activeIssues.length,
++    runnable_issue_identifier: snapshot.runnableIssue?.identifier ?? null,
++    snapshot,
++  })
++
++export const runOrchestrator = ({
++  config,
++  configPath,
++  logLevel,
++}: {
++  readonly config: OrcaConfig
++  readonly configPath: string
++  readonly logLevel: AppLogLevel
++}) =>
++  Effect.gen(function* () {
++    const snapshotRef = yield* Ref.make<RuntimeSnapshot>({
++      updatedAt: new Date(0).toISOString(),
++      activeIssues: [],
++      runnableIssue: null,
++    })
++
++    yield* log(logLevel, "Info", "orca.boot.completed", {
++      config_path: configPath,
++      polling_interval_ms: config.polling.intervalMs,
++      linear_project_slug: config.linear.projectSlug,
++    })
++
++    const pollOnce = fetchActiveIssues(config.linear).pipe(
++      Effect.map(buildRuntimeSnapshot),
++      Effect.tap((snapshot) => Ref.set(snapshotRef, snapshot)),
++      Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
++      Effect.catchCause((cause: Cause.Cause<unknown>) =>
++        log(logLevel, "Error", "orca.linear.poll.failed", {
++          message: formatErrorMessage(Cause.squash(cause)),
++        }),
++      ),
+  ]]></diffHunk>
+  <lineNumber>96</lineNumber>
+  <body>**`Effect.catchCause` swallows interrupt causes, preventing graceful shutdown**
+
+`Effect.catchCause` catches ALL causes — typed failures, defects, _and_ fiber interrupts. `BunRuntime.runMain` (used in `bin.ts`) handles SIGTERM by interrupting the root fiber. That interrupt propagates into `pollOnce`, where this handler catches it, logs it as `orca.linear.poll.failed`, and returns `void`. The while-loop then continues with the next `Effect.sleep`, meaning SIGTERM never terminates the daemon. The process only dies via SIGKILL.
+
+Re-raise interrupt causes so `BunRuntime.runMain` can perform a clean shutdown:
+
+```ts
+Effect.catchCause((cause: Cause.Cause<unknown>) =>
+  Cause.isInterrupted(cause)
+    ? Effect.failCause(cause)
+    : log(logLevel, "Error", "orca.linear.poll.failed", {
+        message: formatErrorMessage(Cause.squash(cause)),
+      }),
+),
+```
+</body>
+</comment>
 
 ## General comments
 
@@ -32,20 +153,17 @@ Confidence: 4/5
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR implements the first end-to-end Orca tracer bullet: Effect Schema-validated config loading, a Linear GraphQL polling loop, PR attachment normalization, and an in-memory `RuntimeSnapshot` managed by a resilient orchestrator. All defects flagged in the previous review round have been resolved — typed schema decoding (`decodeUnknownEffect`), defect-safe polling (`Effect.catchCause`), correct `Ref` usage, `NaN`-safe date comparisons, proper spread ordering in the logger, non-nullable `attachmentId`, the `"terminal"` state literal, and the `"cancelled"` type check.
+This PR delivers the first end-to-end Orca tracer bullet: Effect Schema-validated config loading, a paginated Linear GraphQL polling loop, PR attachment normalization with deduplication, and an in-memory `RuntimeSnapshot` managed by an orchestrator. All issues flagged in the previous review round have been resolved — `Schema.decodeUnknownEffect` for typed decoding, `Effect.catchCause` for defect-resilient polling, `Ref` replacing `SubscriptionRef`, `Number.isFinite` guarding date comparisons, correct spread ordering in the logger, non-nullable `attachmentId`, the `"terminal"` state literal, the `"cancelled"` type check, full pagination with `pageInfo`, and `requiredScore` updated to `4`.
 
-Three new observations from this pass:
+One new issue remains:
 
-- **`attachmentId` / `title` mismatch after deduplication upgrade** (`apps/cli/src/linear.ts:141`): when the title is promoted from a later non-null attachment, `attachmentId` is left pointing at the first (null-title) attachment, so the two fields in `LinkedPullRequestRef` reference different Linear attachment records.
-- **No pagination on the GraphQL query** (`apps/cli/src/linear.ts:75`): `first: 100` silently truncates results with no `hasNextPage` guard; low risk for a small project but worth noting.
-- **Startup errors bypass the structured logger** (`apps/cli/src/index.ts:39`): config load failures and top-level schema errors are written as plain text via `console.error`, inconsistent with the NDJSON format used by all runtime log calls.
-- **Stale `"grepline"` name in root `package.json`** (`package.json:2`): binary was renamed to `orca` but the workspace root name and `dev` script filter still reference `@grepline/cli`.
+- **Interrupt swallowing in `orchestrator.ts`**: `Effect.catchCause` catches all causes — including fiber interrupts. `BunRuntime.runMain` (in `bin.ts`) handles SIGTERM by interrupting the root fiber, but that interrupt will be absorbed by this handler (logged as a poll failure) and the while-loop will continue. The daemon becomes unkillable short of `SIGKILL`. The fix is to re-raise interrupted causes before logging.
 
-<h3>Confidence Score: 4/5</h3>
+<h3>Confidence Score: 3/5</h3>
 
-- Safe to merge — all previously flagged defects are resolved; remaining items are minor logic and style concerns with no critical runtime impact.
-- All critical issues from the prior review (sync schema decode producing defects, unresisted poll-loop termination, missing `"cancelled"` terminal check, nullable `attachmentId`, incorrect log spread order) are cleanly addressed with matching test coverage. The new `attachmentId`/`title` mismatch after deduplication is a real inconsistency but not a runtime failure under current usage. Pagination truncation and log format inconsistency are low-severity style concerns. One point deducted for the `attachmentId` mismatch which could surprise downstream consumers.
-- `apps/cli/src/linear.ts` (attachmentId mismatch, pagination cap) and `package.json` (stale grepline name) warrant a second look.
+- Core polling and normalization logic is solid, but the interrupt-swallowing bug in the orchestrator means the daemon cannot be gracefully shut down via SIGTERM.
+- All previously flagged issues are addressed and test coverage is thorough. The single new issue (Effect.catchCause swallowing interrupt causes) is a real behavioral defect that affects production operability — SIGTERM will not cleanly stop the daemon when deployed — which warrants holding the score at 3 until fixed.
+- apps/cli/src/orchestrator.ts — the Effect.catchCause handler needs to re-raise interrupted causes.
 
 <h3>Important Files Changed</h3>
 
@@ -54,14 +172,14 @@ Three new observations from this pass:
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/linear.ts | Core Linear integration: schema decoding, PR normalization, and GraphQL fetch. `decodeUnknownEffect` correctly used; terminal/cancelled states handled; deduplication upgraded to prefer non-null titles — but `attachmentId` is not updated alongside `title` during the upgrade, creating a mismatch. Query is also silently capped at 100 results with no pagination guard. |
-| apps/cli/src/orchestrator.ts | Polling orchestrator with `Effect.catchCause` for defect resilience, `Ref` (not `SubscriptionRef`), `Number.isFinite` guard on date comparator, and clean infinite loop. All previously flagged issues resolved. |
-| apps/cli/src/orca-config.ts | Config loading with `Schema.decodeUnknownEffect` and `requiredEnvVar` helpers for descriptive env-var error messages. The `message` annotation is passed as a plain string rather than a `(issue: ParseIssue) => string` function (previously flagged); whether this works at runtime depends on the Effect Schema v4 internals. |
-| apps/cli/src/index.ts | CLI entry point wiring config loading, orchestrator, and top-level error handling. Startup errors are emitted as plain `console.error` text while all runtime errors use the structured JSON logger, creating a mixed-format log stream. |
-| apps/cli/src/domain.ts | Domain schemas for `NormalizedIssue`, `LinkedPullRequestRef`, and `RuntimeSnapshot`. All three `NormalizedState` literals present; `attachmentId` correctly typed as non-nullable `Schema.String`; `blockers` stub documented with TODO. |
-| apps/cli/src/logging.ts | Structured JSON logger with severity filtering. Reserved keys (`timestamp`, `level`, `event`) are correctly placed after `...fields` spread so they always win on collision. |
-| package.json | Workspace root still named `"grepline"` with a `dev` filter referencing `@grepline/cli`, while the CLI binary was renamed to `orca` — a partial rename that leaves inconsistent identifiers across the monorepo root. |
-| orca.config.ts | Development config template reading env vars for Linear and GitHub. `requiredScore` updated from `5` to `4`, resolving the self-gate concern from the previous review round. |
+| apps/cli/src/orchestrator.ts | Polling loop correctly uses Ref and catchCause for defect resilience, but the catchCause handler swallows interrupt causes — SIGTERM from BunRuntime.runMain will be absorbed and the daemon will continue running indefinitely. |
+| apps/cli/src/linear.ts | Full pagination with pageInfo, typed decoding via Schema.decodeUnknownEffect, correct deduplication preferring non-null titles (and updating attachmentId consistently), terminal state handling for both "completed" and "cancelled" types, and a TODO stub for blockers — no new issues found. |
+| apps/cli/src/orca-config.ts | Config loading uses Schema.decodeUnknownEffect correctly; requiredEnvVar helper annotates missing env vars with descriptive names. The message annotation is passed as a plain string (previously flagged); test coverage exercises the LINEAR_API_KEY error path. |
+| apps/cli/src/domain.ts | Schemas updated with terminal NormalizedState literal, non-nullable attachmentId (Schema.String), and correct SelectedRunnableIssue/RuntimeSnapshot shapes — all previously flagged issues addressed. |
+| apps/cli/src/index.ts | Startup errors now routed through writeLogLine for structured JSON output; Effect.catch correctly wraps the full command pipeline for typed failure handling. |
+| apps/cli/src/logging.ts | Reserved keys (timestamp, level, event) are now spread last in formatLogLine, correctly overriding any caller-supplied collisions; test coverage verifies this behaviour. |
+| apps/cli/src/linear.test.ts | Comprehensive normalization tests covering deduplication, terminal/cancelled state handling, priority+age sort, NaN-safe date fallback, and pagination — notably the dedupe test now correctly asserts attachmentId: "attachment-11" alongside the non-null title. |
+| orca.config.ts | requiredScore updated from 5 to 4; all field values look correct. Env var placeholders will produce descriptive schema errors via requiredEnvVar. |
 
 </details>
 
@@ -71,44 +189,38 @@ Three new observations from this pass:
 
 ```mermaid
 sequenceDiagram
-    participant CLI as CLI (index.ts)
-    participant Config as loadOrcaConfig
-    participant Orch as runOrchestrator
-    participant Linear as fetchActiveIssues
-    participant Norm as normalizeActiveIssues
-    participant Snap as buildRuntimeSnapshot
-    participant Ref as snapshotRef (Ref)
+    participant BunRuntime
+    participant CLI as index.ts (CLI)
+    participant Orchestrator as orchestrator.ts
+    participant Linear as linear.ts
+    participant LinearAPI as Linear GraphQL API
 
-    CLI->>Config: loadOrcaConfig(path)
-    Config->>Config: dynamic import(path)
-    Config->>Config: Schema.decodeUnknownEffect(OrcaConfigSchema)
-    Config-->>CLI: {config, resolvedPath}
+    BunRuntime->>CLI: runMain(program)
+    CLI->>CLI: loadOrcaConfig → decodeOrcaConfig (Schema.decodeUnknownEffect)
+    CLI->>Orchestrator: runOrchestrator({ config, configPath, logLevel })
+    Orchestrator->>Orchestrator: Ref.make(initialSnapshot)
+    Orchestrator->>CLI: log orca.boot.completed
 
-    CLI->>Orch: runOrchestrator({config, logLevel})
-    Orch->>Ref: Ref.make(emptySnapshot)
-    Orch-->>CLI: log orca.boot.completed
-
-    loop every intervalMs
-        Orch->>Linear: fetchActiveIssues(config.linear)
-        Linear->>Linear: HttpClient POST /graphql (first:100)
-        Linear->>Linear: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
-        Linear->>Norm: normalizeActiveIssues(payload, terminalStates)
-        Norm->>Norm: normalizeLinkedPullRequests(attachments)
-        Norm-->>Linear: NormalizedIssue[]
-        Linear-->>Orch: NormalizedIssue[]
-        Orch->>Snap: buildRuntimeSnapshot(issues)
-        Snap->>Snap: selectRunnableIssue(issues)
-        Snap-->>Orch: RuntimeSnapshot
-        Orch->>Ref: Ref.set(snapshotRef, snapshot)
-        Orch-->>CLI: log orca.snapshot.updated
-        Orch->>Orch: Effect.sleep(intervalMs)
-        note over Orch: Effect.catchCause handles all typed failures and defects
+    loop Every polling.intervalMs
+        Orchestrator->>Linear: fetchActiveIssues(config.linear)
+        loop Paginate while hasNextPage
+            Linear->>LinearAPI: POST /graphql (ActiveIssues query, after cursor)
+            LinearAPI-->>Linear: { data: { issues: { nodes, pageInfo } } }
+            Linear->>Linear: decodeActiveIssuesResponse (Schema.decodeUnknownEffect)
+        end
+        Linear->>Linear: normalizeActiveIssues (terminal/runnable classification, PR dedup)
+        Linear-->>Orchestrator: NormalizedIssue[]
+        Orchestrator->>Orchestrator: buildRuntimeSnapshot (sort by priorityRank → createdAt → identifier)
+        Orchestrator->>Orchestrator: Ref.set(snapshotRef, snapshot)
+        Orchestrator->>CLI: log orca.snapshot.updated
+        Note over Orchestrator: Effect.catchCause absorbs errors AND interrupts
+        Orchestrator->>Orchestrator: Effect.sleep(intervalMs)
     end
 ```
 
 <!-- greptile_other_comments_section -->
 
-<sub>Last reviewed commit: 0bd64c9</sub></body>
+<sub>Last reviewed commit: 485ab13</sub></body>
   </comment>
 </comments>
 

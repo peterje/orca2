@@ -293,6 +293,10 @@ export const updateIssueStateForGitHubInspection = ({
   }
 
   if (inspection.checkSummary.status === "passed") {
+    const nextState: OrcaIssueState = inspection.pullRequest.isDraft
+      ? "WaitingForCi"
+      : "WaitingForAiReview"
+
     return updateIssueState(issueStates, issue, {
       branchName: inspection.pullRequest.headRefName,
       checkSummary: inspection.checkSummary,
@@ -301,7 +305,7 @@ export const updateIssueStateForGitHubInspection = ({
       lastError: null,
       retryCount: currentIssueState?.retryCount ?? 0,
       retryDueAt: null,
-      state: "WaitingForAiReview",
+      state: nextState,
       worktreePath: currentIssueState?.worktreePath ?? null,
     })
   }

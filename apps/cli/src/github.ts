@@ -187,6 +187,13 @@ export const normalizeCheckSummary = ({
       continue
     }
 
+    if (
+      checkRun.conclusion === "cancelled" ||
+      checkRun.conclusion === "stale"
+    ) {
+      continue
+    }
+
     failedCount += 1
   }
 

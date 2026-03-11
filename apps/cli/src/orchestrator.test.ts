@@ -245,6 +245,42 @@ describe("orchestrator", () => {
     expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
   })
 
+  it("keeps draft prs out of waiting for ai review even when ci is green", () => {
+    const nextState = updateIssueStateForGitHubInspection({
+      issue,
+      issueStates: new Map(),
+      inspection: {
+        associationSource: "linear",
+        branchNames: ["pet-47"],
+        checkSummary: {
+          failedCount: 0,
+          pendingCount: 0,
+          status: "passed",
+          successfulCount: 3,
+          totalCount: 3,
+        },
+        headSha: "draft456",
+        kind: "found-pr",
+        pullRequest: {
+          baseRefName: "main",
+          headRefName: "pet-47",
+          headSha: "draft456",
+          isDraft: true,
+          number: 42,
+          owner: "peterje",
+          provider: "github" as const,
+          repo: "orca2",
+          state: "open" as const,
+          title: "feat: run implementation attempts",
+          url: "https://github.com/peterje/orca2/pull/42",
+        },
+      },
+    })
+
+    expect(nextState.get(issue.id)?.state).toBe("WaitingForCi")
+    expect(nextState.get(issue.id)?.currentHeadSha).toBe("draft456")
+  })
+
   it("does not regress downstream review states during github reconciliation", () => {
     const nextState = updateIssueStateForGitHubInspection({
       issue,

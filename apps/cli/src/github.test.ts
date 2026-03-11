@@ -165,4 +165,36 @@ describe("github inspection", () => {
       totalCount: 0,
     })
   })
+
+  it("ignores cancelled and stale check runs when classifying ci", () => {
+    expect(
+      normalizeCheckSummary({
+        checkRuns: {
+          check_runs: [
+            {
+              conclusion: "cancelled",
+              name: "superseded workflow",
+              status: "completed",
+            },
+            {
+              conclusion: "stale",
+              name: "older workflow",
+              status: "completed",
+            },
+          ],
+          total_count: 2,
+        },
+        combinedStatus: {
+          state: "success",
+          total_count: 1,
+        },
+      }),
+    ).toEqual({
+      failedCount: 0,
+      pendingCount: 0,
+      status: "passed",
+      successfulCount: 1,
+      totalCount: 3,
+    })
+  })
 })

@@ -8,7 +8,7 @@ const formatBlockers = (issue: NormalizedIssue) =>
     ? issue.blockers
         .map(
           (blocker) =>
-            `- ${blocker.identifier}: ${blocker.title} (${blocker.stateName})`,
+            `- ${blocker.identifier}: ${blocker.title} (${blocker.stateName}; ${blocker.terminal ? "terminal" : "active"})`,
         )
         .join("\n")
     : "- none"

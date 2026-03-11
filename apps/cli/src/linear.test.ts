@@ -151,6 +151,143 @@ describe("linear normalization", () => {
     ])
   })
 
+  it("normalizes blocker refs from linear issue relations", async () => {
+    const decoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+            nodes: [
+              {
+                id: "issue-12",
+                identifier: "PET-56",
+                title: "wait for dependency",
+                description: null,
+                branchName: null,
+                priority: 2,
+                createdAt: "2026-03-11T16:00:00.000Z",
+                updatedAt: "2026-03-11T16:05:00.000Z",
+                state: {
+                  id: "state-11",
+                  name: "Todo",
+                  type: "unstarted",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+                relations: {
+                  nodes: [
+                    {
+                      id: "relation-ignored",
+                      type: "blocks",
+                      issue: {
+                        id: "issue-12",
+                        identifier: "PET-56",
+                        title: "wait for dependency",
+                        state: {
+                          id: "state-11",
+                          name: "Todo",
+                          type: "unstarted",
+                        },
+                      },
+                      relatedIssue: {
+                        id: "issue-13",
+                        identifier: "PET-57",
+                        title: "downstream work",
+                        state: {
+                          id: "state-12",
+                          name: "Todo",
+                          type: "unstarted",
+                        },
+                      },
+                    },
+                  ],
+                },
+                inverseRelations: {
+                  nodes: [
+                    {
+                      id: "relation-1",
+                      type: "blocks",
+                      issue: {
+                        id: "issue-14",
+                        identifier: "PET-54",
+                        title: "ship shared abstraction",
+                        state: {
+                          id: "state-13",
+                          name: "In Progress",
+                          type: "started",
+                        },
+                      },
+                      relatedIssue: {
+                        id: "issue-12",
+                        identifier: "PET-56",
+                        title: "wait for dependency",
+                        state: {
+                          id: "state-11",
+                          name: "Todo",
+                          type: "unstarted",
+                        },
+                      },
+                    },
+                    {
+                      id: "relation-2",
+                      type: "blocks",
+                      issue: {
+                        id: "issue-15",
+                        identifier: "PET-55",
+                        title: "retire legacy workflow",
+                        state: {
+                          id: "state-14",
+                          name: "Done",
+                          type: "completed",
+                        },
+                      },
+                      relatedIssue: {
+                        id: "issue-12",
+                        identifier: "PET-56",
+                        title: "wait for dependency",
+                        state: {
+                          id: "state-11",
+                          name: "Todo",
+                          type: "unstarted",
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const issues = normalizeActiveIssues(decoded, ["Done", "Canceled"])
+
+    expect(issues[0]?.blockers).toEqual([
+      {
+        id: "issue-14",
+        identifier: "PET-54",
+        title: "ship shared abstraction",
+        stateName: "In Progress",
+        terminal: false,
+      },
+      {
+        id: "issue-15",
+        identifier: "PET-55",
+        title: "retire legacy workflow",
+        stateName: "Done",
+        terminal: true,
+      },
+    ])
+  })
+
   it("fails with a schema error for invalid linear payloads", async () => {
     const failure = await Effect.runPromise(
       Effect.flip(
@@ -361,6 +498,161 @@ describe("linear normalization", () => {
       "PET-47",
       "PET-48",
     ])
+  })
+
+  it("skips blocked issues until every blocker becomes terminal", async () => {
+    const blockedIssue = {
+      id: "issue-16",
+      identifier: "PET-58",
+      title: "dispatch only after dependency",
+      description: null,
+      branchName: null,
+      priority: 1,
+      createdAt: "2026-03-11T17:00:00.000Z",
+      updatedAt: "2026-03-11T17:05:00.000Z",
+      state: {
+        id: "state-15",
+        name: "Todo",
+        type: "unstarted",
+      },
+      labels: {
+        nodes: [],
+      },
+      attachments: {
+        nodes: [],
+      },
+    }
+    const fallbackIssue = {
+      id: "issue-17",
+      identifier: "PET-59",
+      title: "dispatch me instead",
+      description: null,
+      branchName: null,
+      priority: 2,
+      createdAt: "2026-03-11T17:10:00.000Z",
+      updatedAt: "2026-03-11T17:15:00.000Z",
+      state: {
+        id: "state-16",
+        name: "Todo",
+        type: "unstarted",
+      },
+      labels: {
+        nodes: [],
+      },
+      attachments: {
+        nodes: [],
+      },
+    }
+
+    const blockedDecoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+            nodes: [
+              {
+                ...blockedIssue,
+                relations: {
+                  nodes: [],
+                },
+                inverseRelations: {
+                  nodes: [
+                    {
+                      id: "relation-3",
+                      type: "blocks",
+                      issue: {
+                        id: "issue-18",
+                        identifier: "PET-57",
+                        title: "finish prerequisite",
+                        state: {
+                          id: "state-17",
+                          name: "In Progress",
+                          type: "started",
+                        },
+                      },
+                      relatedIssue: {
+                        id: "issue-16",
+                        identifier: "PET-58",
+                        title: "dispatch only after dependency",
+                        state: {
+                          id: "state-15",
+                          name: "Todo",
+                          type: "unstarted",
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+              fallbackIssue,
+            ],
+          },
+        },
+      }),
+    )
+
+    const unblockedDecoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+            nodes: [
+              {
+                ...blockedIssue,
+                relations: {
+                  nodes: [],
+                },
+                inverseRelations: {
+                  nodes: [
+                    {
+                      id: "relation-4",
+                      type: "blocks",
+                      issue: {
+                        id: "issue-18",
+                        identifier: "PET-57",
+                        title: "finish prerequisite",
+                        state: {
+                          id: "state-17",
+                          name: "Done",
+                          type: "completed",
+                        },
+                      },
+                      relatedIssue: {
+                        id: "issue-16",
+                        identifier: "PET-58",
+                        title: "dispatch only after dependency",
+                        state: {
+                          id: "state-15",
+                          name: "Todo",
+                          type: "unstarted",
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+              fallbackIssue,
+            ],
+          },
+        },
+      }),
+    )
+
+    const blockedSnapshot = buildRuntimeSnapshot(
+      normalizeActiveIssues(blockedDecoded, ["Done", "Canceled"]),
+    )
+    const unblockedSnapshot = buildRuntimeSnapshot(
+      normalizeActiveIssues(unblockedDecoded, ["Done", "Canceled"]),
+    )
+
+    expect(blockedSnapshot.runnableIssue?.identifier).toBe("PET-59")
+    expect(unblockedSnapshot.runnableIssue?.identifier).toBe("PET-58")
   })
 
   it("falls back to identifier ordering when createdAt timestamps are invalid", async () => {

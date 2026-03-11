@@ -119,6 +119,7 @@ describe("implementation attempt", () => {
     const repoRoot = await createRepository()
     const cwdOutputPath = path.join(repoRoot, "cwd.txt")
     const worktreeRoot = path.join(repoRoot, ".orca", "worktrees")
+    let observedWorktreePath: string | null = null
 
     let sleepCalls = 0
 
@@ -146,6 +147,10 @@ describe("implementation attempt", () => {
           }),
         issue,
         refreshIssues: () => Effect.succeed([issue]),
+        onWorktreeReady: (worktree) =>
+          Effect.sync(() => {
+            observedWorktreePath = worktree.path
+          }),
         runAgent: ({ cwd }) =>
           Effect.tryPromise(() => writeFile(cwdOutputPath, cwd)),
         sleep: (durationMs) =>
@@ -161,9 +166,14 @@ describe("implementation attempt", () => {
     )
 
     const observedCwd = await readFile(cwdOutputPath, "utf8")
+    if (observedWorktreePath === null) {
+      throw new Error("expected onWorktreeReady to observe the worktree path")
+    }
+    const worktreePath = observedWorktreePath
 
     expect(outcome.state).toBe("WaitingForPr")
     expect(observedCwd).toBe(outcome.worktreePath)
+    expect(worktreePath === outcome.worktreePath).toBe(true)
     expect(sleepCalls).toBe(1)
   })
 

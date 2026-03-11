@@ -65,14 +65,17 @@ type OpencodeClientLike = {
 }
 
 type OpencodeServerLike = {
-  readonly close: () => void
+  readonly close: () => void | Promise<void>
   readonly url: string
 }
 
 const cleanupServer = (server: OpencodeServerLike) =>
-  Effect.sync(() => {
-    server.close()
-  })
+  Effect.tryPromise({
+    try: async () => {
+      await server.close()
+    },
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.void))
 
 const getProperty = (input: unknown, key: string) =>
   typeof input === "object" && input !== null

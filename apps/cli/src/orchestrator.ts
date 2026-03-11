@@ -331,6 +331,17 @@ export const runOrchestrator = ({
         yield* runImplementationAttempt({
           config,
           issue,
+          onWorktreeReady: (worktree) =>
+            Ref.update(issueStatesRef, (currentIssueStates) =>
+              updateIssueState(currentIssueStates, issue, {
+                lastError: null,
+                retryCount:
+                  currentIssueStates.get(issue.id)?.retryCount ?? 0,
+                retryDueAt: null,
+                state: "Implementing",
+                worktreePath: worktree.path,
+              }),
+            ).pipe(Effect.andThen(refreshSnapshot)),
         }).pipe(
           Effect.flatMap((outcome) =>
             Ref.get(activeIssuesRef).pipe(
@@ -382,6 +393,24 @@ export const runOrchestrator = ({
             }
 
             if (error instanceof WorktreeError) {
+              return markManualIntervention(issue, error.message, null).pipe(
+                Effect.andThen(
+                  log(
+                    logLevel,
+                    "Error",
+                    "orca.issue.dispatch.manual-intervention",
+                    {
+                      issue_id: issue.id,
+                      issue_identifier: issue.identifier,
+                      message: error.message,
+                      state: "ManualIntervention",
+                    },
+                  ),
+                ),
+              )
+            }
+
+            if (error instanceof AgentRunnerError) {
               return markManualIntervention(issue, error.message, null).pipe(
                 Effect.andThen(
                   log(

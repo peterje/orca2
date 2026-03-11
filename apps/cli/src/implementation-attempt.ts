@@ -45,6 +45,7 @@ export const runImplementationAttempt = ({
       cwd,
       prompt,
     }),
+  onWorktreeReady = () => Effect.void,
   sleep = (durationMs: number) => Effect.sleep(Duration.millis(durationMs)),
 }: {
   readonly config: OrcaConfig
@@ -57,10 +58,14 @@ export const runImplementationAttempt = ({
     readonly cwd: string
     readonly prompt: string
   }) => Effect.Effect<void, AgentRunnerError>
+  readonly onWorktreeReady?: (
+    worktree: WorktreeHandle,
+  ) => Effect.Effect<void>
   readonly sleep?: (durationMs: number) => Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const worktree = yield* ensureWorktree(issue)
+    yield* onWorktreeReady(worktree)
     const prompt = buildImplementationPrompt(issue)
 
     yield* runAgent({

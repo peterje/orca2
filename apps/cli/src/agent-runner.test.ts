@@ -43,6 +43,9 @@ describe("agent runner", () => {
         }),
       ),
     )
+    if (failure === undefined) {
+      throw new Error("expected the effect to fail")
+    }
 
     expect(failure.message).toBe("agent.maxTurns must be at least 1")
     expect(failure.reason).toBe("protocol-error")
@@ -63,6 +66,9 @@ describe("agent runner", () => {
         }),
       ),
     )
+    if (failure === undefined) {
+      throw new Error("expected the effect to fail")
+    }
 
     expect(failure.reason).toBe("startup-timeout")
     expect(failure.retryable).toBe(true)
@@ -103,6 +109,9 @@ describe("agent runner", () => {
         }),
       ),
     )
+    if (failure === undefined) {
+      throw new Error("expected the effect to fail")
+    }
 
     expect(failure.reason).toBe("response-error")
     expect(failure.retryable).toBe(false)
@@ -144,6 +153,9 @@ describe("agent runner", () => {
         }),
       ),
     )
+    if (failure === undefined) {
+      throw new Error("expected the effect to fail")
+    }
 
     expect(failure.reason).toBe("turn-timeout")
     expect(failure.retryable).toBe(true)
@@ -152,7 +164,7 @@ describe("agent runner", () => {
   })
 
   it("maps an overlong prompt to a retryable turn timeout", async () => {
-    let serverClosed = false
+    let closeFinished = false
 
     const failure = await Effect.runPromise(
       Effect.flip(
@@ -175,8 +187,9 @@ describe("agent runner", () => {
             },
           }),
           createServer: async () => ({
-            close() {
-              serverClosed = true
+            async close() {
+              await new Promise((resolve) => setTimeout(resolve, 10))
+              closeFinished = true
             },
             url: "http://127.0.0.1:4096",
           }),
@@ -185,9 +198,12 @@ describe("agent runner", () => {
         }),
       ),
     )
+    if (failure === undefined) {
+      throw new Error("expected the effect to fail")
+    }
 
     expect(failure.reason).toBe("turn-timeout")
     expect(failure.retryable).toBe(true)
-    expect(serverClosed).toBe(true)
+    expect(closeFinished).toBe(true)
   })
 })

@@ -145,6 +145,40 @@ describe("github inspection", () => {
     expect(branchLookups).toEqual(["pet-47"])
   })
 
+  it("treats a closed linear-linked pull request as ambiguous", async () => {
+    const result = await Effect.runPromise(
+      inspectIssueGitHubState({
+        config: githubConfig,
+        fetchPullRequestByNumber: () =>
+          Effect.succeed({
+            ...openPullRequest,
+            state: "closed",
+          }),
+        issue: {
+          ...baseIssue,
+          linkedPullRequests: [
+            {
+              attachmentId: "attachment-1",
+              number: 42,
+              owner: "peterje",
+              provider: "github" as const,
+              repo: "orca2",
+              title: "feat: run implementation attempts",
+              url: "https://github.com/peterje/orca2/pull/42",
+            },
+          ],
+          normalizedState: "linked-pr-detected" as const,
+        },
+      }) as Effect.Effect<GitHubInspectionResult, unknown, never>,
+    )
+
+    expect(result).toEqual({
+      branchNames: ["pet-47"],
+      kind: "ambiguous",
+      message: "linked pull request peterje/orca2#42 is closed",
+    })
+  })
+
   it("marks missing check signals as ambiguous", () => {
     expect(
       normalizeCheckSummary({

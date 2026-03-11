@@ -257,9 +257,10 @@ const executeGithubJson = <A>(
   config: GitHubConfig,
   url: string,
   schema: Schema.Schema<A>,
-) =>
-  Effect.gen(function* () {
-    const response = yield* HttpClient.execute(
+) : Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient> =>
+  (Effect.gen(function* () {
+    const httpClient = yield* HttpClient.HttpClient
+    const response = yield* httpClient.execute(
       HttpClientRequest.get(url).pipe(
         HttpClientRequest.acceptJson,
         HttpClientRequest.setHeader("Authorization", `Bearer ${config.token}`),
@@ -305,7 +306,7 @@ const executeGithubJson = <A>(
     )
 
     return payload
-  })
+  }) as Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient>)
 
 const pullRequestUrl = ({
   apiUrl,
@@ -387,7 +388,7 @@ const checkRunsUrl = ({
 const fetchPullRequestByNumber = (
   config: GitHubConfig,
   ref: Pick<LinkedPullRequestRef, "owner" | "repo" | "number">,
-) =>
+): Effect.Effect<PullRequest | null, GitHubApiError, HttpClient.HttpClient> =>
   executeGithubJson(
     config,
     pullRequestUrl({
@@ -412,7 +413,11 @@ const fetchPullRequestByNumber = (
 const listPullRequestsByBranch = (
   config: GitHubConfig,
   branchName: string,
-) =>
+): Effect.Effect<
+  Array<PullRequest>,
+  GitHubApiError,
+  HttpClient.HttpClient
+> =>
   executeGithubJson(
     config,
     pullRequestsByBranchUrl({
@@ -437,7 +442,11 @@ const listPullRequestsByBranch = (
 const fetchCheckRuns = (
   config: GitHubConfig,
   pullRequest: PullRequest,
-) =>
+): Effect.Effect<
+  CheckRunsResponse,
+  GitHubApiError,
+  HttpClient.HttpClient
+> =>
   Effect.gen(function* () {
     const checkRuns: Array<CheckRunsResponse["check_runs"][number]> = []
     let page = 1
@@ -489,7 +498,11 @@ const fetchCheckRuns = (
 const fetchCheckSummary = (
   config: GitHubConfig,
   pullRequest: PullRequest,
-) =>
+): Effect.Effect<
+  CheckSummary,
+  GitHubApiError,
+  HttpClient.HttpClient
+> =>
   Effect.all({
     checkRuns: fetchCheckRuns(config, pullRequest),
     combinedStatus: executeGithubJson(
@@ -585,18 +598,26 @@ export const inspectIssueGitHubState = ({
   readonly fetchCheckSummary?: (
     config: GitHubConfig,
     pullRequest: PullRequest,
-  ) => Effect.Effect<CheckSummary, GitHubApiError, unknown>
+  ) => Effect.Effect<CheckSummary, GitHubApiError, HttpClient.HttpClient>
   readonly fetchPullRequestByNumber?: (
     config: GitHubConfig,
     ref: Pick<LinkedPullRequestRef, "owner" | "repo" | "number">,
-  ) => Effect.Effect<PullRequest | null, GitHubApiError, unknown>
+  ) => Effect.Effect<PullRequest | null, GitHubApiError, HttpClient.HttpClient>
   readonly issue: NormalizedIssue
   readonly listPullRequestsByBranch?: (
     config: GitHubConfig,
     branchName: string,
-  ) => Effect.Effect<ReadonlyArray<PullRequest>, GitHubApiError, unknown>
+  ) => Effect.Effect<
+    ReadonlyArray<PullRequest>,
+    GitHubApiError,
+    HttpClient.HttpClient
+  >
   readonly trackedBranchName?: string | null | undefined
-}): Effect.Effect<GitHubInspectionResult, GitHubApiError, unknown> =>
+}): Effect.Effect<
+  GitHubInspectionResult,
+  GitHubApiError,
+  HttpClient.HttpClient
+> =>
   Effect.gen(function* () {
     if (issue.linkedPullRequests.length > 1) {
       return {
@@ -625,6 +646,14 @@ export const inspectIssueGitHubState = ({
           kind: "ambiguous",
           message: `linked pull request ${linkedPullRequest.owner}/${linkedPullRequest.repo}#${linkedPullRequest.number} no longer exists`,
           branchNames: [],
+        } satisfies GitHubInspectionResult
+      }
+
+      if (pullRequest.state === "closed") {
+        return {
+          kind: "ambiguous",
+          message: `linked pull request ${linkedPullRequest.owner}/${linkedPullRequest.repo}#${linkedPullRequest.number} is closed`,
+          branchNames: [pullRequest.headRefName],
         } satisfies GitHubInspectionResult
       }
 

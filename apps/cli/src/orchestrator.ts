@@ -219,6 +219,15 @@ const findIssue = (
   issueId: string,
 ): NormalizedIssue | undefined => issues.find((issue) => issue.id === issueId)
 
+const downstreamGitHubStates = new Set<OrcaIssueState>([
+  "AddressingAiReviewFeedback",
+  "AddressingHumanFeedback",
+  "EvaluatingAiReview",
+  "ReadyForMerge",
+  "Released",
+  "WaitingForHumanReview",
+])
+
 export const updateIssueStateForGitHubInspection = ({
   issue,
   issueStates,
@@ -229,6 +238,12 @@ export const updateIssueStateForGitHubInspection = ({
   readonly inspection: GitHubInspectionResult
 }): IssueStateMap => {
   const currentIssueState = issueStates.get(issue.id)
+  if (
+    currentIssueState !== undefined &&
+    downstreamGitHubStates.has(currentIssueState.state)
+  ) {
+    return issueStates
+  }
 
   if (inspection.kind === "missing-pr") {
     if (currentIssueState?.state !== "WaitingForPr") {
@@ -299,6 +314,7 @@ export const updateIssueStateForGitHubInspection = ({
 }
 
 const statesThatSkipGitHubReconciliation = new Set<OrcaIssueState>([
+  ...downstreamGitHubStates,
   "Implementing",
   "ManualIntervention",
   "RetryQueued",

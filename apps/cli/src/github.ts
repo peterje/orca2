@@ -121,20 +121,44 @@ export type GitHubInspectionResult =
 
 const githubApiVersion = "2022-11-28"
 const githubAcceptHeader = "application/vnd.github+json"
+const githubCheckRunsPerPage = 100
+const maxCheckRunPages = 10
 
-const toPullRequest = (raw: RawPullRequest): PullRequest => ({
-  provider: "github",
-  owner: raw.head.repo?.owner.login ?? raw.base.repo?.owner.login ?? "",
-  repo: raw.head.repo?.name ?? raw.base.repo?.name ?? "",
-  number: raw.number,
-  url: raw.html_url,
-  title: raw.title,
-  state: raw.state,
-  isDraft: raw.draft,
-  headRefName: raw.head.ref,
-  headSha: raw.head.sha,
-  baseRefName: raw.base.ref,
-})
+const toPullRequest = ({
+  fallbackOwner,
+  fallbackRepo,
+  raw,
+}: {
+  readonly fallbackOwner?: string | null | undefined
+  readonly fallbackRepo?: string | null | undefined
+  readonly raw: RawPullRequest
+}) => {
+  const owner =
+    raw.head.repo?.owner.login ?? raw.base.repo?.owner.login ?? fallbackOwner
+  const repo = raw.head.repo?.name ?? raw.base.repo?.name ?? fallbackRepo
+
+  if (!owner || !repo) {
+    return Effect.fail(
+      new GitHubApiError({
+        message: `github omitted repository metadata for pull request #${raw.number}`,
+      }),
+    )
+  }
+
+  return Effect.succeed({
+    provider: "github",
+    owner,
+    repo,
+    number: raw.number,
+    url: raw.html_url,
+    title: raw.title,
+    state: raw.state,
+    isDraft: raw.draft,
+    headRefName: raw.head.ref,
+    headSha: raw.head.sha,
+    baseRefName: raw.base.ref,
+  } satisfies PullRequest)
+}
 
 export const normalizeCheckSummary = ({
   checkRuns,
@@ -332,18 +356,26 @@ const combinedStatusUrl = ({
 const checkRunsUrl = ({
   apiUrl,
   owner,
+  page = 1,
+  perPage = githubCheckRunsPerPage,
   repo,
   sha,
 }: {
   readonly apiUrl: string
   readonly owner: string
+  readonly page?: number
+  readonly perPage?: number
   readonly repo: string
   readonly sha: string
-}) =>
-  new URL(
+}) => {
+  const url = new URL(
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}/check-runs`,
     apiUrl,
-  ).toString()
+  )
+  url.searchParams.set("page", String(page))
+  url.searchParams.set("per_page", String(perPage))
+  return url.toString()
+}
 
 const fetchPullRequestByNumber = (
   config: GitHubConfig,
@@ -359,8 +391,14 @@ const fetchPullRequestByNumber = (
     }),
     RawPullRequestSchema,
   ).pipe(
-    Effect.map((pullRequest) =>
-      pullRequest === null ? null : toPullRequest(pullRequest),
+    Effect.flatMap((pullRequest) =>
+      pullRequest === null
+        ? Effect.succeed(null)
+        : toPullRequest({
+            fallbackOwner: ref.owner,
+            fallbackRepo: ref.repo,
+            raw: pullRequest,
+          }),
     ),
   )
 
@@ -378,26 +416,75 @@ const listPullRequestsByBranch = (
     }),
     RawPullRequestsSchema,
   ).pipe(
-    Effect.map((pullRequests) =>
-      (pullRequests ?? []).map((pullRequest) => toPullRequest(pullRequest)),
+    Effect.flatMap((pullRequests) =>
+      Effect.forEach(pullRequests ?? [], (pullRequest) =>
+        toPullRequest({
+          fallbackOwner: config.owner,
+          fallbackRepo: config.repo,
+          raw: pullRequest,
+        }),
+      ),
     ),
   )
+
+const fetchCheckRuns = (
+  config: GitHubConfig,
+  pullRequest: PullRequest,
+) =>
+  Effect.gen(function* () {
+    const checkRuns: Array<CheckRunsResponse["check_runs"][number]> = []
+    let page = 1
+    let totalCount = 0
+
+    while (true) {
+      if (page > maxCheckRunPages) {
+        return yield* new GitHubApiError({
+          message: `github check run pagination exceeded ${maxCheckRunPages} pages for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+        })
+      }
+
+      const response = yield* executeGithubJson(
+        config,
+        checkRunsUrl({
+          apiUrl: config.apiUrl,
+          owner: pullRequest.owner,
+          page,
+          perPage: githubCheckRunsPerPage,
+          repo: pullRequest.repo,
+          sha: pullRequest.headSha,
+        }),
+        CheckRunsResponseSchema,
+      )
+
+      if (response === null) {
+        return yield* new GitHubApiError({
+          message: `missing github check runs for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number} at ${pullRequest.headSha}`,
+        })
+      }
+
+      totalCount = response.total_count
+      checkRuns.push(...response.check_runs)
+
+      if (
+        response.check_runs.length < githubCheckRunsPerPage ||
+        checkRuns.length >= totalCount
+      ) {
+        return {
+          check_runs: checkRuns,
+          total_count: totalCount,
+        } satisfies CheckRunsResponse
+      }
+
+      page += 1
+    }
+  })
 
 const fetchCheckSummary = (
   config: GitHubConfig,
   pullRequest: PullRequest,
 ) =>
   Effect.all({
-    checkRuns: executeGithubJson(
-      config,
-      checkRunsUrl({
-        apiUrl: config.apiUrl,
-        owner: pullRequest.owner,
-        repo: pullRequest.repo,
-        sha: pullRequest.headSha,
-      }),
-      CheckRunsResponseSchema,
-    ),
+    checkRuns: fetchCheckRuns(config, pullRequest),
     combinedStatus: executeGithubJson(
       config,
       combinedStatusUrl({
@@ -410,10 +497,10 @@ const fetchCheckSummary = (
     ),
   }).pipe(
     Effect.flatMap(({ checkRuns, combinedStatus }) => {
-      if (checkRuns === null || combinedStatus === null) {
+      if (combinedStatus === null) {
         return Effect.fail(
           new GitHubApiError({
-            message: `missing github check data for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number} at ${pullRequest.headSha}`,
+            message: `missing github combined status for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number} at ${pullRequest.headSha}`,
           }),
         )
       }

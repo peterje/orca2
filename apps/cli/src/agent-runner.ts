@@ -391,6 +391,9 @@ export const runCodexAgent = ({
               })
             }
 
+            // Multi-turn orchestration is not wired up yet, so the runner
+            // currently dispatches a single turn and reserves maxTurns for that
+            // future control flow.
             const turnResult = (await request(
               "turn/start",
               {

@@ -1,5 +1,6 @@
 import { Duration, Effect, SubscriptionRef } from "effect"
 import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
+import { formatErrorMessage } from "./error-format"
 import { fetchActiveIssues } from "./linear"
 import type { AppLogLevel } from "./logging"
 import { log } from "./logging"
@@ -86,7 +87,7 @@ export const runOrchestrator = ({
       Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
       Effect.catch((error: unknown) =>
         log(logLevel, "Error", "orca.linear.poll.failed", {
-          message: error instanceof Error ? error.message : String(error),
+          message: formatErrorMessage(error),
         }),
       ),
     )

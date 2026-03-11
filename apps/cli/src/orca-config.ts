@@ -7,16 +7,21 @@ export class ConfigLoadError extends Data.TaggedError("ConfigLoadError")<{
   readonly cause: unknown
 }> {}
 
+const requiredEnvVar = (name: string) =>
+  Schema.String.annotate({
+    message: `${name} environment variable must be set`,
+  })
+
 export const OrcaConfigSchema = Schema.Struct({
   linear: Schema.Struct({
-    apiKey: Schema.String,
+    apiKey: requiredEnvVar("LINEAR_API_KEY"),
     endpoint: Schema.String,
     projectSlug: Schema.String,
     activeStates: Schema.Array(Schema.String),
     terminalStates: Schema.Array(Schema.String),
   }),
   github: Schema.Struct({
-    token: Schema.String,
+    token: requiredEnvVar("GITHUB_TOKEN"),
     apiUrl: Schema.String,
     owner: Schema.String,
     repo: Schema.String,

@@ -1,7 +1,8 @@
 import { BunServices } from "@effect/platform-bun"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { Command, Flag } from "effect/unstable/cli"
+import { formatErrorMessage } from "./error-format"
 import { runOrchestrator } from "./orchestrator"
 import { appLogLevels } from "./logging"
 import { loadOrcaConfig } from "./orca-config"
@@ -37,13 +38,7 @@ export const cli = Command.make(
 export const program = Command.run(cli, { version: "0.0.0" }).pipe(
   Effect.catch((error: unknown) =>
     Effect.sync(() => {
-      const message = Schema.isSchemaError(error)
-        ? String(error.issue)
-        : error instanceof Error
-          ? error.message
-          : String(error)
-
-      console.error(message)
+      console.error(formatErrorMessage(error))
       process.exitCode = 1
     }),
   ),

@@ -82,6 +82,9 @@ const compareIssues = (
 
 const currentTimestamp = () => Date.now()
 
+const hasNonTerminalBlockers = (issue: Pick<NormalizedIssue, "blockers">) =>
+  issue.blockers.some((blocker) => !blocker.terminal)
+
 const isRunnableIssueState = (
   issueState: IssueExecutionState | undefined,
   now = currentTimestamp(),
@@ -107,6 +110,7 @@ export const selectRunnableIssue = (
     .filter(
       (issue) =>
         issue.normalizedState === "runnable" &&
+        !hasNonTerminalBlockers(issue) &&
         isRunnableIssueState(issueStates.get(issue.id)),
     )
     .sort(compareIssues)
@@ -249,7 +253,7 @@ export const applyManualInterventionState = ({
     state: "ManualIntervention",
     worktreePath:
       worktreePath === undefined
-        ? issueStates.get(issue.id)?.worktreePath ?? null
+        ? (issueStates.get(issue.id)?.worktreePath ?? null)
         : worktreePath,
   })
 
@@ -356,8 +360,7 @@ export const runOrchestrator = ({
             Ref.update(issueStatesRef, (currentIssueStates) =>
               updateIssueState(currentIssueStates, issue, {
                 lastError: null,
-                retryCount:
-                  currentIssueStates.get(issue.id)?.retryCount ?? 0,
+                retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
                 retryDueAt: null,
                 state: "Implementing",
                 worktreePath: worktree.path,
@@ -403,12 +406,17 @@ export const runOrchestrator = ({
                           state: "ManualIntervention",
                         },
                       )
-                    : log(logLevel, "Warn", "orca.issue.dispatch.retry-queued", {
-                        issue_id: issue.id,
-                        issue_identifier: issue.identifier,
-                        message: error.message,
-                        state: "RetryQueued",
-                      })
+                    : log(
+                        logLevel,
+                        "Warn",
+                        "orca.issue.dispatch.retry-queued",
+                        {
+                          issue_id: issue.id,
+                          issue_identifier: issue.identifier,
+                          message: error.message,
+                          state: "RetryQueued",
+                        },
+                      )
                 }),
               )
             }

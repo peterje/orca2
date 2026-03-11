@@ -5,7 +5,11 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/unstable/http"
-import type { LinkedPullRequestRef, NormalizedIssue } from "./domain"
+import type {
+  BlockerRef,
+  LinkedPullRequestRef,
+  NormalizedIssue,
+} from "./domain"
 
 const LabelSchema = Schema.Struct({
   id: Schema.String,
@@ -21,6 +25,26 @@ const AttachmentSchema = Schema.Struct({
   sourceType: Schema.NullOr(Schema.String),
 })
 
+const IssueStateSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  type: Schema.NullOr(Schema.String),
+})
+
+const RelatedIssueSchema = Schema.Struct({
+  id: Schema.String,
+  identifier: Schema.String,
+  title: Schema.String,
+  state: IssueStateSchema,
+})
+
+const IssueRelationSchema = Schema.Struct({
+  id: Schema.String,
+  type: Schema.String,
+  issue: RelatedIssueSchema,
+  relatedIssue: RelatedIssueSchema,
+})
+
 const RawIssueSchema = Schema.Struct({
   id: Schema.String,
   identifier: Schema.String,
@@ -30,21 +54,29 @@ const RawIssueSchema = Schema.Struct({
   priority: Schema.Number,
   createdAt: Schema.String,
   updatedAt: Schema.String,
-  state: Schema.Struct({
-    id: Schema.String,
-    name: Schema.String,
-    type: Schema.NullOr(Schema.String),
-  }),
+  state: IssueStateSchema,
   labels: Schema.Struct({
     nodes: Schema.Array(LabelSchema),
   }),
   attachments: Schema.Struct({
     nodes: Schema.Array(AttachmentSchema),
   }),
+  relations: Schema.optional(
+    Schema.Struct({
+      nodes: Schema.Array(IssueRelationSchema),
+    }),
+  ),
+  inverseRelations: Schema.optional(
+    Schema.Struct({
+      nodes: Schema.Array(IssueRelationSchema),
+    }),
+  ),
 })
 
 type RawIssue = Schema.Schema.Type<typeof RawIssueSchema>
 type RawAttachment = RawIssue["attachments"]["nodes"][number]
+type RawRelatedIssue = Schema.Schema.Type<typeof RelatedIssueSchema>
+type RawIssueRelation = Schema.Schema.Type<typeof IssueRelationSchema>
 type ActiveIssuesPage = NonNullable<ActiveIssuesResponse["data"]>["issues"]
 
 const PageInfoSchema = Schema.Struct({
@@ -121,6 +153,58 @@ const activeIssuesQuery = `
             url
             metadata
             sourceType
+          }
+        }
+        relations {
+          nodes {
+            id
+            type
+            issue {
+              id
+              identifier
+              title
+              state {
+                id
+                name
+                type
+              }
+            }
+            relatedIssue {
+              id
+              identifier
+              title
+              state {
+                id
+                name
+                type
+              }
+            }
+          }
+        }
+        inverseRelations {
+          nodes {
+            id
+            type
+            issue {
+              id
+              identifier
+              title
+              state {
+                id
+                name
+                type
+              }
+            }
+            relatedIssue {
+              id
+              identifier
+              title
+              state {
+                id
+                name
+                type
+              }
+            }
           }
         }
       }
@@ -203,6 +287,78 @@ const normalizeLinkedPullRequests = (
 
 const toPriorityRank = (priority: number) => (priority > 0 ? priority : 5)
 
+const isTerminalIssueState = (
+  state: Pick<RawIssue["state"], "name" | "type">,
+  terminalStates: ReadonlyArray<string>,
+) =>
+  terminalStates.includes(state.name) ||
+  state.type === "completed" ||
+  state.type === "cancelled"
+
+const toBlockerRef = ({
+  blocker,
+  terminalStates,
+}: {
+  readonly blocker: RawRelatedIssue
+  readonly terminalStates: ReadonlyArray<string>
+}): BlockerRef => ({
+  id: blocker.id,
+  identifier: blocker.identifier,
+  title: blocker.title,
+  stateName: blocker.state.name,
+  terminal: isTerminalIssueState(blocker.state, terminalStates),
+})
+
+const findBlockerIssue = ({
+  issue,
+  relation,
+}: {
+  readonly issue: RawIssue
+  readonly relation: RawIssueRelation
+}) => {
+  if (relation.type.toLowerCase() !== "blocks") {
+    return null
+  }
+
+  if (relation.relatedIssue.id === issue.id) {
+    return relation.issue
+  }
+
+  return null
+}
+
+const normalizeBlockers = ({
+  issue,
+  terminalStates,
+}: {
+  readonly issue: RawIssue
+  readonly terminalStates: ReadonlyArray<string>
+}): Array<BlockerRef> => {
+  const deduped = new Map<string, BlockerRef>()
+
+  for (const relation of [
+    ...(issue.relations?.nodes ?? []),
+    ...(issue.inverseRelations?.nodes ?? []),
+  ]) {
+    const blocker = findBlockerIssue({ issue, relation })
+    if (blocker === null) {
+      continue
+    }
+
+    deduped.set(
+      blocker.id,
+      toBlockerRef({
+        blocker,
+        terminalStates,
+      }),
+    )
+  }
+
+  return [...deduped.values()].sort((left, right) =>
+    left.identifier.localeCompare(right.identifier),
+  )
+}
+
 export const normalizeActiveIssues = (
   response: ActiveIssuesResponse,
   terminalStates: ReadonlyArray<string>,
@@ -213,10 +369,8 @@ export const normalizeActiveIssues = (
     const linkedPullRequests = normalizeLinkedPullRequests(
       issue.attachments.nodes,
     )
-    const terminal =
-      terminalStates.includes(issue.state.name) ||
-      issue.state.type === "completed" ||
-      issue.state.type === "cancelled"
+    const blockers = normalizeBlockers({ issue, terminalStates })
+    const terminal = isTerminalIssueState(issue.state, terminalStates)
     const runnable = !terminal && linkedPullRequests.length === 0
     const normalizedState = terminal
       ? "terminal"
@@ -238,7 +392,7 @@ export const normalizeActiveIssues = (
       stateType: issue.state.type,
       labels: issue.labels.nodes.map((label) => label.name).sort(),
       linkedPullRequests,
-      blockers: [], // TODO: populate blockers once dependency discovery lands.
+      blockers,
       normalizedState,
     }
   })

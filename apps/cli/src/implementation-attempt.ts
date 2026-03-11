@@ -62,9 +62,13 @@ export const runImplementationAttempt = ({
 
     yield* sleep(shortMissingPrRetryMs)
 
-    const refreshedIssues = yield* refreshIssues()
-    const refreshedIssue = refreshedIssues.find(
-      (candidate) => candidate.id === issue.id,
+    const refreshedIssue = yield* refreshIssues().pipe(
+      Effect.map((issues) =>
+        issues.find((candidate) => candidate.id === issue.id),
+      ),
+      Effect.catchTag("LinearApiError", () =>
+        Effect.sync(() => undefined as NormalizedIssue | undefined),
+      ),
     )
 
     return {

@@ -58,6 +58,18 @@ export const runCodexAgent = ({
   Effect.tryPromise({
     try: () =>
       new Promise<void>((resolve, reject) => {
+        if (config.agent.maxTurns < 1) {
+          reject(
+            new AgentRunnerError({
+              diagnostics: [],
+              message: "agent.maxTurns must be at least 1",
+              reason: "protocol-error",
+              retryable: false,
+            }),
+          )
+          return
+        }
+
         const child = spawn(config.codex.executable, [...config.codex.args], {
           cwd,
           stdio: ["pipe", "pipe", "pipe"],
@@ -414,15 +426,6 @@ export const runCodexAgent = ({
             turnTimeout = setTimeout(() => {
               fail("turn-timeout", "agent turn timed out", true)
             }, config.codex.turnTimeoutMs)
-
-            if (config.agent.maxTurns < 1) {
-              throw new AgentRunnerError({
-                diagnostics: [...diagnostics],
-                message: "agent.maxTurns must be at least 1",
-                reason: "protocol-error",
-                retryable: false,
-              })
-            }
           } catch (error) {
             if (error instanceof AgentRunnerError) {
               fail(error.reason, error.message, error.retryable)

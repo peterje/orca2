@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { runCodexAgent } from "./agent-runner"
@@ -30,6 +30,39 @@ const writeAgentScript = async (contents: string) => {
 }
 
 describe("agent runner", () => {
+  it("rejects invalid maxTurns before spawning the agent process", async () => {
+    const { cwd } = await writeAgentScript(`setInterval(() => {}, 1000)\n`)
+    const missingExecutable = path.join(cwd, "missing-agent")
+
+    const failure = await Effect.runPromise(
+      Effect.flip(
+        runCodexAgent({
+          config: {
+            agent: {
+              maxRetryBackoffMs: 1_000,
+              maxTurns: 0,
+            },
+            codex: {
+              args: [],
+              executable: missingExecutable,
+              readTimeoutMs: 50,
+              stallTimeoutMs: 1_000,
+              turnTimeoutMs: 1_000,
+            },
+          },
+          cwd,
+          prompt: "say hello",
+        }),
+      ),
+    )
+
+    expect(failure.message).toBe("agent.maxTurns must be at least 1")
+    expect(failure.reason).toBe("protocol-error")
+    expect(failure.retryable).toBe(false)
+
+    await expect(access(missingExecutable)).rejects.toThrow()
+  })
+
   it("maps a missing startup handshake to a retryable startup timeout", async () => {
     const { cwd, scriptPath } = await writeAgentScript(
       `setInterval(() => {}, 1000)\n`,

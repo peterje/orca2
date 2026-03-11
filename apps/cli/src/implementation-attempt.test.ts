@@ -13,6 +13,7 @@ import {
   runImplementationAttempt,
   shortMissingPrRetryMs,
 } from "./implementation-attempt"
+import { LinearApiError } from "./linear"
 
 const execFileAsync = promisify(execFile)
 const tempDirectories = new Set<string>()
@@ -240,5 +241,41 @@ input.on("line", (line) => {
     )
 
     expect(outcome.state).toBe("LinkedPrDetected")
+  })
+
+  it("treats a transient linear refresh failure as waiting for pr", async () => {
+    const outcome = await Effect.runPromise(
+      runImplementationAttempt({
+        config: {
+          ...baseConfig,
+          worktree: {
+            repoRoot: "/repo",
+            root: "/repo/.orca/worktrees",
+          },
+        },
+        ensureWorktree: () =>
+          Effect.succeed({
+            branchName: "pet-47",
+            path: "/repo/.orca/worktrees/pet-47",
+            reused: true,
+          }),
+        issue,
+        refreshIssues: () =>
+          Effect.fail(
+            new LinearApiError({
+              message: "temporary linear outage",
+            }),
+          ),
+        runAgent: () => Effect.void,
+        sleep: () => Effect.void,
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(BunServices.layer, FetchHttpClient.layer),
+        ),
+      ),
+    )
+
+    expect(outcome.state).toBe("WaitingForPr")
+    expect(outcome.worktreePath).toBe("/repo/.orca/worktrees/pet-47")
   })
 })

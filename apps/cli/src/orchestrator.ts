@@ -8,6 +8,7 @@ import type {
 } from "./domain"
 import { formatErrorMessage } from "./error-format"
 import { WorktreeError } from "./git-worktree"
+import type { ImplementationAttemptOutcome } from "./implementation-attempt"
 import { runImplementationAttempt } from "./implementation-attempt"
 import { fetchActiveIssues } from "./linear"
 import type { AppLogLevel } from "./logging"
@@ -169,6 +170,34 @@ const findIssue = (
   issueId: string,
 ): NormalizedIssue | undefined => issues.find((issue) => issue.id === issueId)
 
+export const applyImplementationOutcome = ({
+  activeIssues,
+  issue,
+  issueStates,
+  outcome,
+}: {
+  readonly activeIssues: ReadonlyArray<NormalizedIssue>
+  readonly issue: NormalizedIssue
+  readonly issueStates: IssueStateMap
+  readonly outcome: ImplementationAttemptOutcome
+}): IssueStateMap => {
+  const activeIssue = findIssue(activeIssues, issue.id)
+  if (
+    outcome.state === "LinkedPrDetected" ||
+    activeIssue?.normalizedState !== "runnable"
+  ) {
+    return clearIssueState(issueStates, issue.id)
+  }
+
+  return updateIssueState(issueStates, issue, {
+    lastError: null,
+    retryCount: 0,
+    retryDueAt: null,
+    state: "WaitingForPr",
+    worktreePath: outcome.worktreePath,
+  })
+}
+
 const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
   log(minimumLogLevel, "Info", "orca.snapshot.updated", {
     active_issue_count: snapshot.activeIssues.length,
@@ -272,19 +301,18 @@ export const runOrchestrator = ({
           issue,
         }).pipe(
           Effect.flatMap((outcome) =>
-            Ref.update(issueStatesRef, (currentIssueStates) => {
-              if (outcome.state === "LinkedPrDetected") {
-                return clearIssueState(currentIssueStates, issue.id)
-              }
-
-              return updateIssueState(currentIssueStates, issue, {
-                lastError: null,
-                retryCount: 0,
-                retryDueAt: null,
-                state: "WaitingForPr",
-                worktreePath: outcome.worktreePath,
-              })
-            }),
+            Ref.get(activeIssuesRef).pipe(
+              Effect.flatMap((activeIssues) =>
+                Ref.update(issueStatesRef, (currentIssueStates) =>
+                  applyImplementationOutcome({
+                    activeIssues,
+                    issue,
+                    issueStates: currentIssueStates,
+                    outcome,
+                  }),
+                ),
+              ),
+            ),
           ),
           Effect.tap(() =>
             log(logLevel, "Info", "orca.issue.dispatch.completed", {
@@ -343,7 +371,7 @@ export const runOrchestrator = ({
               Effect.andThen(refreshSnapshot),
             ),
           ),
-          Effect.forkDetach,
+          Effect.forkChild,
         )
       })
 

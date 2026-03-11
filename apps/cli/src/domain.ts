@@ -10,8 +10,16 @@ export const OrcaIssueStateSchema = Schema.Union([
   Schema.Literal("Todo"),
   Schema.Literal("Implementing"),
   Schema.Literal("WaitingForPr"),
+  Schema.Literal("WaitingForCi"),
+  Schema.Literal("WaitingForAiReview"),
+  Schema.Literal("EvaluatingAiReview"),
+  Schema.Literal("AddressingAiReviewFeedback"),
+  Schema.Literal("WaitingForHumanReview"),
+  Schema.Literal("AddressingHumanFeedback"),
+  Schema.Literal("ReadyForMerge"),
   Schema.Literal("RetryQueued"),
   Schema.Literal("ManualIntervention"),
+  Schema.Literal("Released"),
 ])
 
 export type OrcaIssueState = Schema.Schema.Type<typeof OrcaIssueStateSchema>
@@ -29,6 +37,37 @@ export const LinkedPullRequestRefSchema = Schema.Struct({
 export type LinkedPullRequestRef = Schema.Schema.Type<
   typeof LinkedPullRequestRefSchema
 >
+
+export const PullRequestSchema = Schema.Struct({
+  provider: Schema.Literal("github"),
+  owner: Schema.String,
+  repo: Schema.String,
+  number: Schema.Number,
+  url: Schema.String,
+  title: Schema.String,
+  state: Schema.Union([Schema.Literal("open"), Schema.Literal("closed")]),
+  isDraft: Schema.Boolean,
+  headRefName: Schema.String,
+  headSha: Schema.String,
+  baseRefName: Schema.String,
+})
+
+export type PullRequest = Schema.Schema.Type<typeof PullRequestSchema>
+
+export const CheckSummarySchema = Schema.Struct({
+  status: Schema.Union([
+    Schema.Literal("pending"),
+    Schema.Literal("passed"),
+    Schema.Literal("failed"),
+    Schema.Literal("ambiguous"),
+  ]),
+  totalCount: Schema.Number,
+  pendingCount: Schema.Number,
+  successfulCount: Schema.Number,
+  failedCount: Schema.Number,
+})
+
+export type CheckSummary = Schema.Schema.Type<typeof CheckSummarySchema>
 
 export const BlockerRefSchema = Schema.Struct({
   id: Schema.String,
@@ -75,9 +114,13 @@ export const ClaimedIssueSchema = Schema.Struct({
   issueId: Schema.String,
   issueIdentifier: Schema.String,
   state: OrcaIssueStateSchema,
+  branchName: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   retryDueAt: Schema.NullOr(Schema.String),
   lastError: Schema.NullOr(Schema.String),
+  currentPullRequest: Schema.NullOr(PullRequestSchema),
+  currentHeadSha: Schema.NullOr(Schema.String),
+  checkSummary: Schema.NullOr(CheckSummarySchema),
 })
 
 export type ClaimedIssue = Schema.Schema.Type<typeof ClaimedIssueSchema>

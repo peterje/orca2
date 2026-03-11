@@ -1,13 +1,17 @@
 import { Cause, Duration, Effect, Ref } from "effect"
 import { AgentRunnerError } from "./agent-runner"
 import type {
+  CheckSummary,
   NormalizedIssue,
   OrcaIssueState,
+  PullRequest,
   RuntimeSnapshot,
   SelectedRunnableIssue,
 } from "./domain"
 import { formatErrorMessage } from "./error-format"
 import { WorktreeError } from "./git-worktree"
+import type { GitHubInspectionResult } from "./github"
+import { inspectIssueGitHubState } from "./github"
 import type { ImplementationAttemptOutcome } from "./implementation-attempt"
 import { runImplementationAttempt } from "./implementation-attempt"
 import { fetchActiveIssues } from "./linear"
@@ -16,6 +20,10 @@ import { log } from "./logging"
 import type { OrcaConfig } from "./orca-config"
 
 interface IssueExecutionState {
+  readonly branchName: string | null
+  readonly checkSummary: CheckSummary | null
+  readonly currentHeadSha: string | null
+  readonly currentPullRequest: PullRequest | null
   readonly lastError: string | null
   readonly retryCount: number
   readonly retryDueAt: string | null
@@ -147,6 +155,10 @@ export const buildRuntimeSnapshot = (
 
       return [
         {
+          branchName: issueState.branchName,
+          checkSummary: issueState.checkSummary,
+          currentHeadSha: issueState.currentHeadSha,
+          currentPullRequest: issueState.currentPullRequest,
           issueId: issue.id,
           issueIdentifier: issue.identifier,
           lastError: issueState.lastError,
@@ -192,7 +204,7 @@ const reconcileIssueStates = (
 
   for (const [issueId, issueState] of issueStates) {
     const issue = issuesById.get(issueId)
-    if (issue === undefined || issue.normalizedState !== "runnable") {
+    if (issue === undefined || issue.normalizedState === "terminal") {
       continue
     }
 
@@ -207,6 +219,140 @@ const findIssue = (
   issueId: string,
 ): NormalizedIssue | undefined => issues.find((issue) => issue.id === issueId)
 
+export const updateIssueStateForGitHubInspection = ({
+  issue,
+  issueStates,
+  inspection,
+}: {
+  readonly issue: NormalizedIssue
+  readonly issueStates: IssueStateMap
+  readonly inspection: GitHubInspectionResult
+}): IssueStateMap => {
+  const currentIssueState = issueStates.get(issue.id)
+
+  if (inspection.kind === "missing-pr") {
+    if (currentIssueState?.state !== "WaitingForPr") {
+      return issueStates
+    }
+
+    return updateIssueState(issueStates, issue, {
+      branchName: currentIssueState.branchName,
+      checkSummary: null,
+      currentHeadSha: null,
+      currentPullRequest: null,
+      lastError: null,
+      retryCount: currentIssueState.retryCount,
+      retryDueAt: null,
+      state: "WaitingForPr",
+      worktreePath: currentIssueState.worktreePath,
+    })
+  }
+
+  if (inspection.kind === "ambiguous") {
+    return applyManualInterventionState({
+      issue,
+      issueStates,
+      message: inspection.message,
+    })
+  }
+
+  if (inspection.checkSummary.status === "pending") {
+    return updateIssueState(issueStates, issue, {
+      branchName: inspection.pullRequest.headRefName,
+      checkSummary: inspection.checkSummary,
+      currentHeadSha: inspection.headSha,
+      currentPullRequest: inspection.pullRequest,
+      lastError: null,
+      retryCount: currentIssueState?.retryCount ?? 0,
+      retryDueAt: null,
+      state: "WaitingForCi",
+      worktreePath: currentIssueState?.worktreePath ?? null,
+    })
+  }
+
+  if (inspection.checkSummary.status === "passed") {
+    return updateIssueState(issueStates, issue, {
+      branchName: inspection.pullRequest.headRefName,
+      checkSummary: inspection.checkSummary,
+      currentHeadSha: inspection.headSha,
+      currentPullRequest: inspection.pullRequest,
+      lastError: null,
+      retryCount: currentIssueState?.retryCount ?? 0,
+      retryDueAt: null,
+      state: "WaitingForAiReview",
+      worktreePath: currentIssueState?.worktreePath ?? null,
+    })
+  }
+
+  return applyManualInterventionState({
+    issue,
+    issueStates,
+    message:
+      inspection.checkSummary.status === "failed"
+        ? `ci failed for ${issue.identifier} on ${inspection.headSha}`
+        : `unable to classify github checks for ${issue.identifier}`,
+    branchName: inspection.pullRequest.headRefName,
+    checkSummary: inspection.checkSummary,
+    currentHeadSha: inspection.headSha,
+    currentPullRequest: inspection.pullRequest,
+  })
+}
+
+const statesThatSkipGitHubReconciliation = new Set<OrcaIssueState>([
+  "Implementing",
+  "ManualIntervention",
+  "RetryQueued",
+])
+
+const reconcileIssuesWithGitHub = ({
+  config,
+  issues,
+  issueStates,
+}: {
+  readonly config: OrcaConfig["github"]
+  readonly issues: ReadonlyArray<NormalizedIssue>
+  readonly issueStates: IssueStateMap
+}) =>
+  Effect.gen(function* () {
+    let currentIssueStates = issueStates
+
+    for (const issue of issues) {
+      const currentIssueState = currentIssueStates.get(issue.id)
+
+      if (
+        currentIssueState !== undefined &&
+        statesThatSkipGitHubReconciliation.has(currentIssueState.state)
+      ) {
+        continue
+      }
+
+      currentIssueStates = yield* inspectIssueGitHubState({
+        config,
+        issue,
+        trackedBranchName: currentIssueState?.branchName,
+      }).pipe(
+        Effect.map((inspection) =>
+          updateIssueStateForGitHubInspection({
+            issue,
+            issueStates: currentIssueStates,
+            inspection,
+          }),
+        ),
+        Effect.catch((error: unknown) =>
+          Effect.succeed(
+            applyManualInterventionState({
+              issue,
+              issueStates: currentIssueStates,
+              message: formatErrorMessage(error),
+            }),
+          ),
+        ),
+      )
+    }
+
+    return currentIssueStates
+  })
+
 export const applyImplementationOutcome = ({
   activeIssues,
   issue,
@@ -219,14 +365,15 @@ export const applyImplementationOutcome = ({
   readonly outcome: ImplementationAttemptOutcome
 }): IssueStateMap => {
   const activeIssue = findIssue(activeIssues, issue.id)
-  if (
-    outcome.state === "LinkedPrDetected" ||
-    activeIssue?.normalizedState !== "runnable"
-  ) {
+  if (activeIssue === undefined || activeIssue.normalizedState === "terminal") {
     return clearIssueState(issueStates, issue.id)
   }
 
   return updateIssueState(issueStates, issue, {
+    branchName: outcome.branchName,
+    checkSummary: null,
+    currentHeadSha: null,
+    currentPullRequest: null,
     lastError: null,
     retryCount: 0,
     retryDueAt: null,
@@ -238,15 +385,39 @@ export const applyImplementationOutcome = ({
 export const applyManualInterventionState = ({
   issue,
   issueStates,
+  branchName,
+  checkSummary,
+  currentHeadSha,
+  currentPullRequest,
   message,
   worktreePath,
 }: {
   readonly issue: Pick<NormalizedIssue, "id">
   readonly issueStates: IssueStateMap
   readonly message: string
+  readonly branchName?: string | null | undefined
+  readonly checkSummary?: CheckSummary | null | undefined
+  readonly currentHeadSha?: string | null | undefined
+  readonly currentPullRequest?: PullRequest | null | undefined
   readonly worktreePath?: string | null | undefined
 }): IssueStateMap =>
   updateIssueState(issueStates, issue, {
+    branchName:
+      branchName === undefined
+        ? (issueStates.get(issue.id)?.branchName ?? null)
+        : branchName,
+    checkSummary:
+      checkSummary === undefined
+        ? (issueStates.get(issue.id)?.checkSummary ?? null)
+        : checkSummary,
+    currentHeadSha:
+      currentHeadSha === undefined
+        ? (issueStates.get(issue.id)?.currentHeadSha ?? null)
+        : currentHeadSha,
+    currentPullRequest:
+      currentPullRequest === undefined
+        ? (issueStates.get(issue.id)?.currentPullRequest ?? null)
+        : currentPullRequest,
     lastError: message,
     retryCount: issueStates.get(issue.id)?.retryCount ?? 0,
     retryDueAt: null,
@@ -308,6 +479,13 @@ export const runOrchestrator = ({
         yield* Ref.set(
           issueStatesRef,
           updateIssueState(currentIssueStates, issue, {
+            branchName: currentIssueStates.get(issue.id)?.branchName ?? null,
+            checkSummary:
+              currentIssueStates.get(issue.id)?.checkSummary ?? null,
+            currentHeadSha:
+              currentIssueStates.get(issue.id)?.currentHeadSha ?? null,
+            currentPullRequest:
+              currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
             lastError: error.message,
             retryCount: retryPlan.retryCount,
             retryDueAt: retryPlan.retryDueAt,
@@ -336,6 +514,13 @@ export const runOrchestrator = ({
       Effect.gen(function* () {
         yield* Ref.update(issueStatesRef, (currentIssueStates) =>
           updateIssueState(currentIssueStates, issue, {
+            branchName: currentIssueStates.get(issue.id)?.branchName ?? null,
+            checkSummary:
+              currentIssueStates.get(issue.id)?.checkSummary ?? null,
+            currentHeadSha:
+              currentIssueStates.get(issue.id)?.currentHeadSha ?? null,
+            currentPullRequest:
+              currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
             lastError: null,
             retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
             retryDueAt: null,
@@ -359,6 +544,13 @@ export const runOrchestrator = ({
           onWorktreeReady: (worktree) =>
             Ref.update(issueStatesRef, (currentIssueStates) =>
               updateIssueState(currentIssueStates, issue, {
+                branchName: worktree.branchName,
+                checkSummary:
+                  currentIssueStates.get(issue.id)?.checkSummary ?? null,
+                currentHeadSha:
+                  currentIssueStates.get(issue.id)?.currentHeadSha ?? null,
+                currentPullRequest:
+                  currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
                 lastError: null,
                 retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
                 retryDueAt: null,
@@ -493,9 +685,14 @@ export const runOrchestrator = ({
             issues,
             yield* Ref.get(issueStatesRef),
           )
+          const githubReconciledIssueStates = yield* reconcileIssuesWithGitHub({
+            config: config.github,
+            issues: issues.filter((issue) => issue.normalizedState !== "terminal"),
+            issueStates: reconciledIssueStates,
+          })
 
           yield* Ref.set(activeIssuesRef, issues)
-          yield* Ref.set(issueStatesRef, reconciledIssueStates)
+          yield* Ref.set(issueStatesRef, githubReconciledIssueStates)
 
           const snapshot = yield* refreshSnapshot
           const runningIssueId = yield* Ref.get(runningIssueIdRef)

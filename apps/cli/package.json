@@ -1,10 +1,10 @@
 {
-  "name": "@grepline/cli",
+  "name": "@orca/cli",
   "type": "module",
   "version": "0.0.0",
   "private": true,
   "bin": {
-    "grepline": "./dist/bin.mjs"
+    "orca": "./dist/bin.mjs"
   },
   "exports": {
     ".": "./src/index.ts"
@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "dev": "bun run src/bin.ts",
+    "test": "bun test",
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsdown"
   },

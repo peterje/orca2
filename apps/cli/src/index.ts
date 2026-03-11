@@ -1,11 +1,48 @@
 import { BunServices } from "@effect/platform-bun"
-import { Console, Effect } from "effect"
-import { Command } from "effect/unstable/cli"
+import { Effect, Layer } from "effect"
+import { FetchHttpClient } from "effect/unstable/http"
+import { Command, Flag } from "effect/unstable/cli"
+import { formatErrorMessage } from "./error-format"
+import { appLogLevels, writeLogLine } from "./logging"
+import { runOrchestrator } from "./orchestrator"
+import { loadOrcaConfig } from "./orca-config"
 
-export const cli = Command.make("grepline", {}, () =>
-  Console.log("Hello, world!"),
-).pipe(Command.withDescription("Print a hello world greeting"))
+const logLevelFlag = Flag.choiceWithValue(
+  "log-level",
+  appLogLevels.map((level) => [level.toLowerCase(), level] as const),
+).pipe(Flag.withDefault("Info"), Flag.withDescription("minimum log level"))
+
+const configFlag = Flag.string("config").pipe(
+  Flag.withDefault("orca.config.ts"),
+  Flag.withDescription("path to orca.config.ts"),
+)
+
+export const cli = Command.make(
+  "orca",
+  {
+    config: configFlag,
+    logLevel: logLevelFlag,
+  },
+  ({ config, logLevel }) =>
+    loadOrcaConfig(config).pipe(
+      Effect.flatMap(({ config: orcaConfig, resolvedPath }) =>
+        runOrchestrator({
+          config: orcaConfig,
+          configPath: resolvedPath,
+          logLevel,
+        }),
+      ),
+    ),
+).pipe(Command.withDescription("poll Linear and track the runnable orca issue"))
 
 export const program = Command.run(cli, { version: "0.0.0" }).pipe(
-  Effect.provide(BunServices.layer),
+  Effect.catch((error: unknown) =>
+    Effect.sync(() => {
+      writeLogLine("Error", "orca.boot.failed", {
+        message: formatErrorMessage(error),
+      })
+      process.exitCode = 1
+    }),
+  ),
+  Effect.provide(Layer.mergeAll(BunServices.layer, FetchHttpClient.layer)),
 )

@@ -1,5 +1,5 @@
 {
-  "name": "grepline",
+  "name": "orca",
   "type": "module",
   "private": true,
   "workspaces": [
@@ -7,9 +7,10 @@
   ],
   "scripts": {
     "prepare": "if [ -d .git ]; then husky; fi && bunx effect-language-service patch",
+    "test": "bun --filter './apps/*' test",
     "check": "bun --filter './apps/*' check",
     "build": "bun --filter './apps/*' build",
-    "dev": "bun --filter '@grepline/cli' dev"
+    "dev": "bun --filter '@orca/cli' dev"
   },
   "packageManager": "bun@1.3.7",
   "devDependencies": {

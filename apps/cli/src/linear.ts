@@ -70,10 +70,7 @@ export class LinearApiError extends Data.TaggedError("LinearApiError")<{
 }> {}
 
 export const decodeActiveIssuesResponse = (input: unknown) =>
-  Effect.sync(
-    (): ActiveIssuesResponse =>
-      Schema.decodeUnknownSync(ActiveIssuesResponseSchema)(input),
-  )
+  Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)(input)
 
 const activeIssuesQuery = `
   query ActiveIssues($projectSlug: String!, $activeStates: [String!]!) {
@@ -175,6 +172,11 @@ export const normalizeActiveIssues = (
       terminalStates.includes(issue.state.name) ||
       issue.state.type === "completed"
     const runnable = !terminal && linkedPullRequests.length === 0
+    const normalizedState = terminal
+      ? "terminal"
+      : runnable
+        ? "runnable"
+        : "linked-pr-detected"
 
     return {
       id: issue.id,
@@ -191,7 +193,7 @@ export const normalizeActiveIssues = (
       labels: issue.labels.nodes.map((label) => label.name).sort(),
       linkedPullRequests,
       blockers: [],
-      normalizedState: runnable ? "runnable" : "linked-pr-detected",
+      normalizedState,
       runnable,
     }
   })

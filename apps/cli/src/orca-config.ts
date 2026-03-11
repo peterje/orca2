@@ -54,9 +54,7 @@ export const OrcaConfigSchema = Schema.Struct({
 export type OrcaConfig = Schema.Schema.Type<typeof OrcaConfigSchema>
 
 export const decodeOrcaConfig = (input: unknown) =>
-  Effect.sync(
-    (): OrcaConfig => Schema.decodeUnknownSync(OrcaConfigSchema)(input),
-  )
+  Schema.decodeUnknownEffect(OrcaConfigSchema)(input)
 
 export const loadOrcaConfig = (configPath: string) =>
   Effect.gen(function* () {

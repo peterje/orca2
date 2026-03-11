@@ -69,10 +69,8 @@ describe("orca config", () => {
   })
 
   it("fails fast with a schema error for invalid config", async () => {
-    let failure: unknown = undefined
-
-    try {
-      Effect.runSync(
+    const failure = await Effect.runPromise(
+      Effect.flip(
         decodeOrcaConfig({
           linear: {
             apiKey: undefined,
@@ -82,13 +80,14 @@ describe("orca config", () => {
             terminalStates: ["Done"],
           },
         }),
-      )
-    } catch (error) {
-      failure = error
-    }
+      ),
+    )
 
-    expect(failure).toBeInstanceOf(Error)
-    expect(String(failure)).toContain("Expected string, got undefined")
+    expect(Schema.isSchemaError(failure)).toBe(true)
+    if (!Schema.isSchemaError(failure)) {
+      throw failure
+    }
+    expect(String(failure.issue)).toContain("Expected string, got undefined")
   })
 
   it("loads a ts config file from disk", async () => {

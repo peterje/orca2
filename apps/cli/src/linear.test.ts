@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { describe, expect, it } from "bun:test"
 import { decodeActiveIssuesResponse, normalizeActiveIssues } from "./linear"
 import { buildRuntimeSnapshot } from "./orchestrator"
@@ -69,6 +69,69 @@ describe("linear normalization", () => {
       },
     ])
     expect(issues[0]?.normalizedState).toBe("linked-pr-detected")
+    expect(issues[0]?.runnable).toBe(false)
+  })
+
+  it("fails with a schema error for invalid linear payloads", async () => {
+    const failure = await Effect.runPromise(
+      Effect.flip(
+        decodeActiveIssuesResponse({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "issue-1",
+                },
+              ],
+            },
+          },
+        }),
+      ),
+    )
+
+    expect(Schema.isSchemaError(failure)).toBe(true)
+    if (!Schema.isSchemaError(failure)) {
+      throw failure
+    }
+    expect(String(failure.issue)).toContain("identifier")
+  })
+
+  it("marks terminal issues without pull requests as terminal", async () => {
+    const decoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "issue-5",
+                identifier: "PET-49",
+                title: "already done",
+                description: null,
+                branchName: null,
+                priority: 2,
+                createdAt: "2026-03-11T08:00:00.000Z",
+                updatedAt: "2026-03-11T08:05:00.000Z",
+                state: {
+                  id: "state-4",
+                  name: "Done",
+                  type: "completed",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const issues = normalizeActiveIssues(decoded, ["Done", "Canceled"])
+
+    expect(issues[0]?.normalizedState).toBe("terminal")
     expect(issues[0]?.runnable).toBe(false)
   })
 

@@ -3,6 +3,7 @@ import { Schema } from "effect"
 const NormalizedStateSchema = Schema.Union([
   Schema.Literal("runnable"),
   Schema.Literal("linked-pr-detected"),
+  Schema.Literal("terminal"),
 ])
 
 export const LinkedPullRequestRefSchema = Schema.Struct({

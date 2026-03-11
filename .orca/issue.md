@@ -24,141 +24,71 @@ Build the first end-to-end Orca tracer bullet: start from `orca.config.ts`, vali
 
 # Greptile review
 
-Confidence: 4/5
+Confidence: 3/5
 
 ## Unresolved review threads
 
-<comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
+<comment author="greptile-apps" path="apps/cli/src/domain.ts">
   <diffHunk><![CDATA[
-@@ -0,0 +1,99 @@
-+import { Cause, Duration, Effect, SubscriptionRef } from "effect"
-+import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
-+import { formatErrorMessage } from "./error-format"
-+import { fetchActiveIssues } from "./linear"
-+import type { AppLogLevel } from "./logging"
-+import { log } from "./logging"
-+import type { OrcaConfig } from "./orca-config"
+@@ -0,0 +1,71 @@
++import { Schema } from "effect"
 +
-+const compareIssues = (
-+  left: RuntimeSnapshot["activeIssues"][number],
-+  right: RuntimeSnapshot["activeIssues"][number],
-+) => {
-+  const priorityDifference = left.priorityRank - right.priorityRank
-+  if (priorityDifference !== 0) {
-+    return priorityDifference
-+  }
++const NormalizedStateSchema = Schema.Union([
++  Schema.Literal("runnable"),
++  Schema.Literal("linked-pr-detected"),
++  Schema.Literal("terminal"),
++])
 +
-+  const createdAtDifference =
-+    new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
-+  if (createdAtDifference !== 0) {
-+    return createdAtDifference
-+  }
-+
-+  return left.identifier.localeCompare(right.identifier)
-+}
-+
-+export const selectRunnableIssue = (
-+  issues: RuntimeSnapshot["activeIssues"],
-+): SelectedRunnableIssue | null => {
-+  const runnableIssues = issues
-+    .filter((issue) => issue.runnable)
-+    .sort(compareIssues)
-+  const selectedIssue = runnableIssues[0]
-+
-+  if (!selectedIssue) {
-+    return null
-+  }
-+
-+  return {
-+    id: selectedIssue.id,
-+    identifier: selectedIssue.identifier,
-+    title: selectedIssue.title,
-+    normalizedState: "runnable",
-+  }
-+}
-+
-+export const buildRuntimeSnapshot = (
-+  issues: RuntimeSnapshot["activeIssues"],
-+): RuntimeSnapshot => ({
-+  updatedAt: new Date().toISOString(),
-+  activeIssues: [...issues].sort(compareIssues),
-+  runnableIssue: selectRunnableIssue(issues),
-+})
-+
-+const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
-+  log(minimumLogLevel, "Info", "orca.snapshot.updated", {
-+    active_issue_count: snapshot.activeIssues.length,
-+    runnable_issue_identifier: snapshot.runnableIssue?.identifier ?? null,
-+    snapshot,
-+  })
-+
-+export const runOrchestrator = ({
-+  config,
-+  configPath,
-+  logLevel,
-+}: {
-+  readonly config: OrcaConfig
-+  readonly configPath: string
-+  readonly logLevel: AppLogLevel
-+}) =>
-+  Effect.gen(function* () {
-+    const snapshotRef = yield* SubscriptionRef.make<RuntimeSnapshot>({
-+      updatedAt: new Date(0).toISOString(),
-+      activeIssues: [],
-+      runnableIssue: null,
-+    })
++export const LinkedPullRequestRefSchema = Schema.Struct({
++  provider: Schema.Literal("github"),
++  owner: Schema.String,
++  repo: Schema.String,
++  number: Schema.Number,
++  url: Schema.String,
++  title: Schema.NullOr(Schema.String),
++  attachmentId: Schema.NullOr(Schema.String),
   ]]></diffHunk>
-  <lineNumber>76</lineNumber>
-  <body>**`snapshotRef` is private and unexposed — `SubscriptionRef` adds no value here**
+  <lineNumber>16</lineNumber>
+  <body>**`attachmentId` is typed as nullable but is never `null` at runtime**
 
-`snapshotRef` is created inside `runOrchestrator` and is never returned, yielded, or passed to any other effect. Because `runOrchestrator` is an infinite loop that never resolves, there is no way for external code to subscribe to or read the snapshot — making the pub/sub overhead of `SubscriptionRef` effectively unused. The ref is currently indistinguishable from a plain `Ref` at runtime.
+`Schema.NullOr(Schema.String)` allows `null` for `attachmentId`, but `normalizeLinkedPullRequests` in `linear.ts` always sets it to `attachment.id` — a `Schema.String` that is guaranteed non-null by the `AttachmentSchema`. The nullable type forces every downstream consumer to handle a `null` branch that can never actually occur, adding noise to call sites.
 
-If the intent is to expose the snapshot to future consumers (e.g., an HTTP status endpoint or an agent layer), `snapshotRef` needs to be part of the function's return type before the loop starts, or threaded through a service layer. Consider either:
-
-1. Returning `snapshotRef` via a separate channel (e.g., `Deferred` or a service) before entering the polling loop.
-2. Replacing with `Ref.make` until a subscriber actually exists, and leaving a `// TODO: switch to SubscriptionRef when X subscribes` comment to document the intent.
-
-Without one of these changes, the reactive subscription capability of `SubscriptionRef` is silently dormant.
-</body>
-</comment>
-<comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
-  <diffHunk><![CDATA[
-@@ -0,0 +1,99 @@
-+import { Cause, Duration, Effect, SubscriptionRef } from "effect"
-+import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
-+import { formatErrorMessage } from "./error-format"
-+import { fetchActiveIssues } from "./linear"
-+import type { AppLogLevel } from "./logging"
-+import { log } from "./logging"
-+import type { OrcaConfig } from "./orca-config"
-+
-+const compareIssues = (
-+  left: RuntimeSnapshot["activeIssues"][number],
-+  right: RuntimeSnapshot["activeIssues"][number],
-+) => {
-+  const priorityDifference = left.priorityRank - right.priorityRank
-+  if (priorityDifference !== 0) {
-+    return priorityDifference
-+  }
-+
-+  const createdAtDifference =
-+    new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
-+  if (createdAtDifference !== 0) {
-  ]]></diffHunk>
-  <lineNumber>20</lineNumber>
-  <body>**`new Date()` parse in sort comparator silently absorbs invalid dates**
-
-`new Date(invalidString).getTime()` returns `NaN`, and `NaN - NaN === NaN`. JavaScript's `Array.sort` treats a comparator returning `NaN` as `0` (equal), so the `createdAt` tiebreaker is silently dropped and falls through to the `localeCompare` identifier comparison. In practice Linear returns valid ISO 8601 timestamps, so this is low risk — but a runtime invariant violation (e.g., a corrupted response body that passes schema validation because `createdAt: Schema.String` only checks the type, not the format) would produce subtly wrong sort order without any error.
-
-Consider guarding with a non-`NaN` fallback:
+Since there is no current code path that produces a `null` `attachmentId`, tightening the schema would improve clarity:
 
 ```suggestion
-  const leftTime = new Date(left.createdAt).getTime()
-  const rightTime = new Date(right.createdAt).getTime()
-  const createdAtDifference =
-    Number.isFinite(leftTime) && Number.isFinite(rightTime)
-      ? leftTime - rightTime
-      : 0
+  attachmentId: Schema.String,
+```
+</body>
+</comment>
+<comment author="greptile-apps" path="apps/cli/src/orca-config.ts">
+  <diffHunk><![CDATA[
+@@ -0,0 +1,78 @@
++import { Data, Effect, Schema } from "effect"
++import { pathToFileURL } from "node:url"
++import path from "node:path"
++
++export class ConfigLoadError extends Data.TaggedError("ConfigLoadError")<{
++  readonly path: string
++  readonly cause: unknown
++}> {}
++
++const requiredEnvVar = (name: string) =>
++  Schema.String.annotate({
++    message: `${name} environment variable must be set`,
++  })
+  ]]></diffHunk>
+  <lineNumber>13</lineNumber>
+  <body>**`message` annotation should be a function, not a plain string**
+
+In Effect Schema v4, the `message` annotation on `Annotations.Schema` is typed as `(issue: ParseIssue) => string` — a function, not a bare string literal. Passing a string directly compiles because `.annotate()` accepts a loosely-typed annotations record, but at runtime Effect Schema calls the annotation value as a function. If it is a string, the call throws `TypeError: annotation is not a function`, meaning the custom message is never rendered and the test at `orca-config.test.ts:88` that asserts the error contains `"LINEAR_API_KEY"` would fail.
+
+The fix is to wrap the message in a thunk:
+
+```suggestion
+const requiredEnvVar = (name: string) =>
+  Schema.String.annotate({
+    message: () => `${name} environment variable must be set`,
+  })
 ```
 </body>
 </comment>
@@ -169,23 +99,18 @@ Consider guarding with a non-`NaN` fallback:
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR implements the first end-to-end Orca tracer bullet: it wires `orca.config.ts` schema validation, a Linear GraphQL polling loop, PR attachment normalization, and an in-memory `RuntimeSnapshot` orchestrator. All issues from the previous review round have been addressed — `Schema.decodeUnknownEffect` replaces the sync variant in both `orca-config.ts` and `linear.ts`, the `normalizedState` union now includes `"terminal"`, the `blockers: []` stub is annotated with a TODO, and the polling loop is hardened with `Effect.catchCause`.
+This PR implements the first end-to-end Orca tracer bullet: `orca.config.ts` schema validation via `Schema.decodeUnknownEffect`, a Linear GraphQL polling loop that normalizes active issues into `runnable` / `linked-pr-detected` / `terminal` states, GitHub PR URL extraction and deduplication from Linear attachments, and an in-memory `RuntimeSnapshot` maintained by the orchestrator. All critical issues from the previous review round have been addressed.
 
-**Key changes:**
-- `orca-config.ts` — `decodeOrcaConfig` uses `Schema.decodeUnknownEffect`; `requiredEnvVar` annotates missing env var fields with human-readable error messages naming the expected variable.
-- `linear.ts` — `decodeActiveIssuesResponse` returns a proper typed failure; `normalizeActiveIssues` correctly classifies issues into `runnable`, `linked-pr-detected`, and `terminal` states; GitHub PR URLs are extracted and deduplicated from Linear attachments.
-- `orchestrator.ts` — `Effect.catchCause` replaces `Effect.catch` on the poll body, making the loop resilient to both typed failures and defects; a `SubscriptionRef` snapshot is built and logged each poll cycle.
-- Three test files added covering config decode, Linear payload normalization, sort/selection logic, and error formatting.
+**Key observations:**
+- `requiredEnvVar` in `orca-config.ts` annotates missing env var fields with `message: "..."` (a plain string) rather than `message: () => "..."` (the function form expected by Effect Schema). If Effect Schema calls the annotation as a function at runtime, this would throw a `TypeError` and silently suppress the named-variable message — and the `orca-config.test.ts` assertion that the error contains `"LINEAR_API_KEY"` would fail.
+- `attachmentId` in `LinkedPullRequestRefSchema` is typed `NullOr(Schema.String)` but is always assigned a non-null `attachment.id` in `normalizeLinkedPullRequests`, unnecessarily widening the type for all downstream consumers.
+- The PR description's verification steps list `bun run check` and `bun run build` but omit `bun test`, which is required by `AGENTS.md` ("test and typecheck before committing"). The three new test files cover critical normalization paths; confirming they pass before merge is recommended.
 
-**Minor observations:**
-- `snapshotRef` (`SubscriptionRef`) is written to inside `runOrchestrator` but is local and never returned or exposed — no external code can subscribe to it in the current implementation. The reactive capability of `SubscriptionRef` is dormant until the function signature is updated to surface the ref.
-- The verification steps (`bun run check`, `bun run build`) do not include `bun test`. Given the PR adds three test files that cover critical normalization and decode paths, explicitly running `bun test` before merge is recommended to confirm all assertions pass.
+<h3>Confidence Score: 3/5</h3>
 
-<h3>Confidence Score: 4/5</h3>
-
-- Safe to merge with minor follow-up: the two style-level observations (unexposed SubscriptionRef and NaN-silent sort) do not affect correctness for the current tracer-bullet scope, and tests were not explicitly verified to pass.
-- All critical issues from the previous review round have been resolved. The remaining observations are style-level or low-probability edge cases. The only noteworthy gap is that `bun test` is absent from the listed verification steps, leaving a small uncertainty about whether the new test assertions pass cleanly.
-- apps/cli/src/orchestrator.ts — `snapshotRef` is never exposed; consider whether `SubscriptionRef` or plain `Ref` better communicates intent at this stage.
+- Safe to merge after verifying `bun test` passes, particularly the `requiredEnvVar` message annotation behavior.
+- The core logic (schema decode, polling loop, issue normalization, error handling) is solid and all previous critical issues have been resolved. The score is held at 3 rather than 4 because `bun test` is absent from the stated verification steps — the `requiredEnvVar` plain-string annotation may cause the `orca-config.test.ts` assertion to fail at runtime, which would be a functional regression in the user-facing error message for missing env vars. Once tests are confirmed green this could be raised to 4.
+- Pay close attention to `apps/cli/src/orca-config.ts` (the `requiredEnvVar` message annotation) and `apps/cli/src/domain.ts` (`attachmentId` nullability).
 
 <h3>Important Files Changed</h3>
 
@@ -194,12 +119,13 @@ This PR implements the first end-to-end Orca tracer bullet: it wires `orca.confi
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/orchestrator.ts | Polling loop now resilient via `Effect.catchCause`; `SubscriptionRef` created but never exposed or subscribed to — acts as plain `Ref` in the current codebase. |
-| apps/cli/src/linear.ts | Correctly uses `Schema.decodeUnknownEffect` (not the sync variant), adds a "terminal" normalizedState variant, and documents the `blockers: []` stub with a TODO comment. No new issues found. |
-| apps/cli/src/orca-config.ts | Config validation now uses `Schema.decodeUnknownEffect`; `requiredEnvVar` annotates missing env var fields with named messages. Implementation looks correct. |
-| apps/cli/src/domain.ts | Clean domain schema definitions for `NormalizedIssue`, `LinkedPullRequestRef`, `BlockerRef`, `SelectedRunnableIssue`, and `RuntimeSnapshot`; all three `normalizedState` variants are present. |
-| apps/cli/src/index.ts | CLI entry point wires config loading, orchestrator, and error formatting correctly. `Effect.catch` handles all typed failures from config load and orchestration. |
-| orca.config.ts | Root config file reads secrets from env vars; safe to commit. All required fields match the `OrcaConfigSchema` shape. |
+| apps/cli/src/orchestrator.ts | Polling loop correctly uses `Effect.catchCause` for resilience; switched from `SubscriptionRef` to plain `Ref` (addressing prior feedback); `snapshotRef` is still local and never returned, meaning the `Ref` writes are currently unobservable from outside the function — acceptable for tracer-bullet scope. |
+| apps/cli/src/linear.ts | Uses `Schema.decodeUnknownEffect` correctly; normalizes all three issue states (`runnable`, `linked-pr-detected`, `terminal`); deduplicates PR attachment URLs by owner/repo/number; `blockers: []` stub is annotated with a TODO. No new logic issues found. |
+| apps/cli/src/orca-config.ts | Config decode correctly uses `Schema.decodeUnknownEffect`; `requiredEnvVar` attempts to annotate missing-env-var fields with a named message but passes a plain string instead of a function `(issue: ParseIssue) => string`, which may cause a runtime `TypeError` when the annotation is invoked during error rendering. |
+| apps/cli/src/domain.ts | Clean domain schema definitions; all three `normalizedState` literals present; `attachmentId` on `LinkedPullRequestRefSchema` is typed `NullOr(String)` but is never assigned `null` in practice — minor type over-widening. |
+| apps/cli/src/index.ts | CLI entry point correctly wires config loading, orchestrator, and error formatting; `FetchHttpClient.layer` and `BunServices.layer` are properly provided; `Effect.catch` handles all typed failures from both load and orchestration paths. |
+| apps/cli/src/linear.test.ts | Good test coverage for normalization, deduplication, schema validation, terminal/runnable state classification, priority/age/identifier sort ordering, and the NaN-safe timestamp fallback path. |
+| apps/cli/src/orca-config.test.ts | Tests valid decode, invalid-config schema failure (asserting `"LINEAR_API_KEY"` in the error message), and disk-load round-trip; correctness of the `LINEAR_API_KEY` assertion depends on whether the `requiredEnvVar` message annotation renders as expected at runtime. |
 
 </details>
 
@@ -209,44 +135,50 @@ This PR implements the first end-to-end Orca tracer bullet: it wires `orca.confi
 
 ```mermaid
 sequenceDiagram
-    participant CLI as index.ts (CLI)
+    participant CLI as index.ts (CLI entry)
     participant Config as orca-config.ts
     participant Orch as orchestrator.ts
     participant Linear as linear.ts
     participant LinAPI as Linear GraphQL API
 
     CLI->>Config: loadOrcaConfig(configPath)
-    Config->>Config: import(orca.config.ts)
+    Config->>Config: import(pathToFileURL(resolvedPath))
     Config->>Config: Schema.decodeUnknownEffect(OrcaConfigSchema)
     Config-->>CLI: { config, resolvedPath }
 
     CLI->>Orch: runOrchestrator({ config, configPath, logLevel })
-    Orch->>Orch: SubscriptionRef.make(initialSnapshot)
-    Orch->>Orch: log(orca.boot.completed)
+    Orch->>Orch: Ref.make(initialSnapshot)
+    Orch->>Orch: log("orca.boot.completed")
 
-    loop every intervalMs
+    loop every config.polling.intervalMs ms
         Orch->>Linear: fetchActiveIssues(config.linear)
         Linear->>LinAPI: POST /graphql (ActiveIssues query)
         LinAPI-->>Linear: JSON response
         Linear->>Linear: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
+        Linear->>Linear: normalizeLinkedPullRequests(attachments)
         Linear->>Linear: normalizeActiveIssues(payload, terminalStates)
         Linear-->>Orch: NormalizedIssue[]
 
         Orch->>Orch: buildRuntimeSnapshot(issues)
-        Orch->>Orch: SubscriptionRef.set(snapshotRef, snapshot)
-        Orch->>Orch: log(orca.snapshot.updated)
+        Note over Orch: selectRunnableIssue — sort by priorityRank,<br/>createdAt, then identifier
+        Orch->>Orch: Ref.set(snapshotRef, snapshot)
+        Orch->>Orch: log("orca.snapshot.updated")
 
-        alt fetch or decode error
-            Orch->>Orch: catchCause → log(orca.linear.poll.failed)
+        alt fetch / decode / GraphQL error
+            Orch->>Orch: catchCause → log("orca.linear.poll.failed")
         end
 
         Orch->>Orch: Effect.sleep(intervalMs)
+    end
+
+    alt config load or schema error
+        CLI->>CLI: Effect.catch → formatErrorMessage → process.exitCode = 1
     end
 ```
 
 <!-- greptile_other_comments_section -->
 
-<sub>Last reviewed commit: 2ea59ee</sub></body>
+<sub>Last reviewed commit: 699c367</sub></body>
   </comment>
 </comments>
 

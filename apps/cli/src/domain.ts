@@ -13,7 +13,7 @@ export const LinkedPullRequestRefSchema = Schema.Struct({
   number: Schema.Number,
   url: Schema.String,
   title: Schema.NullOr(Schema.String),
-  attachmentId: Schema.NullOr(Schema.String),
+  attachmentId: Schema.String,
 })
 
 export type LinkedPullRequestRef = Schema.Schema.Type<

@@ -37,15 +37,13 @@ export const OrcaConfigSchema = Schema.Struct({
     root: Schema.String,
   }),
   agent: Schema.Struct({
+    maxRetries: Schema.Number,
     maxTurns: Schema.Number,
     maxRetryBackoffMs: Schema.Number,
   }),
-  codex: Schema.Struct({
-    executable: Schema.String,
-    args: Schema.Array(Schema.String),
+  opencode: Schema.Struct({
+    startupTimeoutMs: Schema.Number,
     turnTimeoutMs: Schema.Number,
-    readTimeoutMs: Schema.Number,
-    stallTimeoutMs: Schema.Number,
   }),
   greptile: Schema.Struct({
     enabled: Schema.Boolean,

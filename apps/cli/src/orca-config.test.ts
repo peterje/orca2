@@ -30,15 +30,13 @@ const validConfig = {
     root: ".orca/worktrees",
   },
   agent: {
+    maxRetries: 5,
     maxTurns: 12,
     maxRetryBackoffMs: 300_000,
   },
-  codex: {
-    executable: "codex",
-    args: ["app-server"],
+  opencode: {
+    startupTimeoutMs: 5_000,
     turnTimeoutMs: 3_600_000,
-    readTimeoutMs: 5_000,
-    stallTimeoutMs: 300_000,
   },
   greptile: {
     enabled: true,
@@ -140,15 +138,13 @@ describe("orca config", () => {
     root: ".orca/worktrees"
   },
   agent: {
+    maxRetries: 5,
     maxTurns: 12,
     maxRetryBackoffMs: 300000
   },
-  codex: {
-    executable: "codex",
-    args: ["app-server"],
+  opencode: {
+    startupTimeoutMs: 5000,
     turnTimeoutMs: 3600000,
-    readTimeoutMs: 5000,
-    stallTimeoutMs: 300000
   },
   greptile: {
     enabled: true,

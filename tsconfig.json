@@ -3,7 +3,7 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "target": "esnext",
-    "types": ["bun"],
+    "types": ["bun", "node"],
     "sourceMap": true,
     "declaration": true,
     "declarationMap": true,

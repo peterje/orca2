@@ -6,6 +6,16 @@ const NormalizedStateSchema = Schema.Union([
   Schema.Literal("terminal"),
 ])
 
+export const OrcaIssueStateSchema = Schema.Union([
+  Schema.Literal("Todo"),
+  Schema.Literal("Implementing"),
+  Schema.Literal("WaitingForPr"),
+  Schema.Literal("RetryQueued"),
+  Schema.Literal("ManualIntervention"),
+])
+
+export type OrcaIssueState = Schema.Schema.Type<typeof OrcaIssueStateSchema>
+
 export const LinkedPullRequestRefSchema = Schema.Struct({
   provider: Schema.Literal("github"),
   owner: Schema.String,
@@ -61,10 +71,22 @@ export type SelectedRunnableIssue = Schema.Schema.Type<
   typeof SelectedRunnableIssueSchema
 >
 
+export const ClaimedIssueSchema = Schema.Struct({
+  issueId: Schema.String,
+  issueIdentifier: Schema.String,
+  state: OrcaIssueStateSchema,
+  worktreePath: Schema.NullOr(Schema.String),
+  retryDueAt: Schema.NullOr(Schema.String),
+  lastError: Schema.NullOr(Schema.String),
+})
+
+export type ClaimedIssue = Schema.Schema.Type<typeof ClaimedIssueSchema>
+
 export const RuntimeSnapshotSchema = Schema.Struct({
   updatedAt: Schema.String,
   activeIssues: Schema.Array(NormalizedIssueSchema),
   runnableIssue: Schema.NullOr(SelectedRunnableIssueSchema),
+  claimedIssues: Schema.Array(ClaimedIssueSchema),
 })
 
 export type RuntimeSnapshot = Schema.Schema.Type<typeof RuntimeSnapshotSchema>

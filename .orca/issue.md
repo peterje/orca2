@@ -24,25 +24,121 @@ Build the first end-to-end Orca tracer bullet: start from `orca.config.ts`, vali
 
 # Greptile review
 
-Confidence: 3/5
+Confidence: 4/5
 
 ## Unresolved review threads
 
-<comment author="greptile-apps" path="orca.config.ts">
+<comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
   <diffHunk><![CDATA[
-@@ -0,0 +1,43 @@
-+export default {
-+  linear: {
-+    apiKey: process.env.LINEAR_API_KEY,
-+    endpoint: "https://api.linear.app/graphql",
-+    projectSlug: "orca",
+@@ -0,0 +1,99 @@
++import { Duration, Effect, SubscriptionRef } from "effect"
++import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
++import { formatErrorMessage } from "./error-format"
++import { fetchActiveIssues } from "./linear"
++import type { AppLogLevel } from "./logging"
++import { log } from "./logging"
++import type { OrcaConfig } from "./orca-config"
++
++const compareIssues = (
++  left: RuntimeSnapshot["activeIssues"][number],
++  right: RuntimeSnapshot["activeIssues"][number],
++) => {
++  const priorityDifference = left.priorityRank - right.priorityRank
++  if (priorityDifference !== 0) {
++    return priorityDifference
++  }
++
++  const createdAtDifference =
++    new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
++  if (createdAtDifference !== 0) {
++    return createdAtDifference
++  }
++
++  return left.identifier.localeCompare(right.identifier)
++}
++
++export const selectRunnableIssue = (
++  issues: RuntimeSnapshot["activeIssues"],
++): SelectedRunnableIssue | null => {
++  const runnableIssues = issues
++    .filter((issue) => issue.runnable)
++    .sort(compareIssues)
++  const selectedIssue = runnableIssues[0]
++
++  if (!selectedIssue) {
++    return null
++  }
++
++  return {
++    id: selectedIssue.id,
++    identifier: selectedIssue.identifier,
++    title: selectedIssue.title,
++    normalizedState: "runnable",
++  }
++}
++
++export const buildRuntimeSnapshot = (
++  issues: RuntimeSnapshot["activeIssues"],
++): RuntimeSnapshot => ({
++  updatedAt: new Date().toISOString(),
++  activeIssues: [...issues].sort(compareIssues),
++  runnableIssue: selectRunnableIssue(issues),
++})
++
++const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
++  log(minimumLogLevel, "Info", "orca.snapshot.updated", {
++    active_issue_count: snapshot.activeIssues.length,
++    runnable_issue_identifier: snapshot.runnableIssue?.identifier ?? null,
++    snapshot,
++  })
++
++export const runOrchestrator = ({
++  config,
++  configPath,
++  logLevel,
++}: {
++  readonly config: OrcaConfig
++  readonly configPath: string
++  readonly logLevel: AppLogLevel
++}) =>
++  Effect.gen(function* () {
++    const snapshotRef = yield* SubscriptionRef.make<RuntimeSnapshot>({
++      updatedAt: new Date(0).toISOString(),
++      activeIssues: [],
++      runnableIssue: null,
++    })
++
++    yield* log(logLevel, "Info", "orca.boot.completed", {
++      config_path: configPath,
++      polling_interval_ms: config.polling.intervalMs,
++      linear_project_slug: config.linear.projectSlug,
++    })
++
++    const pollOnce = fetchActiveIssues(config.linear).pipe(
++      Effect.map(buildRuntimeSnapshot),
++      Effect.tap((snapshot) => SubscriptionRef.set(snapshotRef, snapshot)),
++      Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
++      Effect.catch((error: unknown) =>
++        log(logLevel, "Error", "orca.linear.poll.failed", {
++          message: formatErrorMessage(error),
++        }),
++      ),
++    )
   ]]></diffHunk>
-  <lineNumber>5</lineNumber>
-  <body>**Missing env vars produce an opaque schema error without naming the variable**
+  <lineNumber>93</lineNumber>
+  <body>**Polling loop is not resilient to defects**
 
-Both `apiKey` values come from `process.env.*` and are therefore `string | undefined`. When an env var is not set, `decodeOrcaConfig` fails with `"Expected string, got undefined"` — which is correct fast-fail behaviour, but gives the operator no indication of *which* env var needs to be set.
+`Effect.catch` only intercepts typed failures in the `E` channel. If any step inside `fetchActiveIssues` produces an Effect *defect* — an untyped exception such as an unexpected `null` access, an internal runtime error, or a network-layer panic that the HTTP client surfaces as an unchecked throw — the `Effect.catch` handler here will be bypassed entirely. The defect propagates straight through `yield* pollOnce` and terminates the orchestrator fiber with no `orca.linear.poll.failed` log entry and no possibility of continuing to poll.
 
-Consider guarding before the value reaches the schema, so the thrown error names the expected variable. Alternatively, use a `Schema.filter` on the field that annotates the error with a descriptive message. Either approach ensures the operator sees a concrete action to take rather than a bare schema parse-tree message.</body>
+For a long-running daemon this means a single unexpected error silently kills the process. Wrapping the poll body with `Effect.catchAllCause` would catch both typed failures and defects, keeping the loop alive:
+
+```ts
+Effect.catchAllCause((cause) =>
+  log(logLevel, "Error", "orca.linear.poll.failed", {
+    message: formatErrorMessage(Cause.squash(cause)),
+  }),
+),
+```</body>
 </comment>
 
 ## General comments
@@ -51,26 +147,19 @@ Consider guarding before the value reaches the schema, so the thrown error names
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR implements the first end-to-end Orca tracer bullet: it boots from `orca.config.ts`, validates config with Effect Schema, polls Linear every 5 seconds for active issues, normalizes linked GitHub PR attachments with deduplication, selects at most one runnable issue by priority/age/identifier, and maintains a `SubscriptionRef`-backed in-memory snapshot — addressing all three acceptance criteria from PET-46.
+This PR introduces the first end-to-end Orca tracer bullet: config loading with `Schema`-backed validation, a Linear GraphQL polling loop, PR-attachment normalization, and an in-memory `RuntimeSnapshot` maintained by the orchestrator. The implementation is well-structured and addresses previous review concerns — `Schema.decodeUnknownEffect` is now used throughout (replacing the `Effect.sync`/`decodeUnknownSync` defect-producing pattern), the `requiredEnvVar` annotation surfaces named env-var errors, and the `NormalizedStateSchema` now correctly includes `"terminal"` as a variant.
 
-**Key changes:**
-- `orca-config.ts` — Effect Schema config loader using `Schema.decodeUnknownEffect` for typed fast-fail on invalid config
-- `linear.ts` — GraphQL client, PR URL regex normalization, and `normalizeActiveIssues` mapping raw issues to `NormalizedIssue`; previous issues with `Effect.sync`/`Schema.decodeUnknownSync` defects have been resolved
-- `orchestrator.ts` — `while(true)` poll loop with `SubscriptionRef` snapshot, structured JSON logging, and per-poll error recovery
-- `domain.ts` — Shared Effect Schema types including `NormalizedIssue`, `RuntimeSnapshot`, and `BlockerRef`; `"terminal"` state variant is now correctly present
-- `index.ts` — CLI flags (`--config`, `--log-level`) wired to the orchestrator, with a top-level error formatter
-- `linear.test.ts` / `orca-config.test.ts` — Good coverage of normalization, deduplication, schema validation, and snapshot selection
+Key findings:
 
-**Issues found:**
-- `ConfigLoadError` (thrown when `orca.config.ts` cannot be found or imported) has its `path` and `cause` fields silently dropped by the top-level error handler in `index.ts`, which only reads `.message` — users see `"ConfigLoadError"` instead of the OS error
-- The poll-loop catch block in `orchestrator.ts` uses `error.message` for all errors, losing structured schema parse information when `decodeActiveIssuesResponse` fails
-- Missing env vars in `orca.config.ts` produce a bare `"Expected string, got undefined"` schema error without identifying which env var to set
+- **Polling loop resilience** (`apps/cli/src/orchestrator.ts`): `Effect.catch` only intercepts typed failures; any defect in the poll pipeline will crash the orchestrator fiber silently. `Effect.catchAllCause` is needed to keep the daemon alive across unexpected errors.
+- **Missing `test` script** (`apps/cli/package.json`): The `scripts` block has no `"test"` entry. `bun run check` + `bun run build` (the documented verification steps) never execute the test suite, so tests are invisible to CI.
+- **`blockers` stub** (`apps/cli/src/linear.ts`): `blockers` is permanently `[]` with no `// TODO` comment. Downstream issues (PET-47–PET-51) depend on this field; the silence makes it easy to forget it is unimplemented.
 
-<h3>Confidence Score: 3/5</h3>
+<h3>Confidence Score: 4/5</h3>
 
-- Mostly safe to merge — the core Effect/Schema defect issue from the previous review has been fixed, but a `ConfigLoadError` swallowing bug and minor error-message quality issues remain.
-- The two critical `Effect.sync`/`Schema.decodeUnknownSync` defect bugs from the previous review are resolved, and the `"terminal"` state variant is now correctly present. However, a new logic issue was found: the top-level `Effect.catch` in `index.ts` extracts only `error.message` from `ConfigLoadError`, which is set to the tag name `"ConfigLoadError"` by `Data.TaggedError` — the `path` and `cause` fields (containing the real OS error) are never shown to the user. This means the "invalid config fails fast with a schema-backed error" acceptance criterion partially holds for schema failures but silently drops the human-readable message for file-not-found failures. The remaining concerns (opaque schema error in the poll-loop catch, unnamed env vars in `orca.config.ts`) are UX-level and non-blocking.
-- `apps/cli/src/index.ts` — top-level `ConfigLoadError` handler drops the helpful `cause` and `path` fields
+- Safe to merge with minor resilience and process improvements recommended before subsequent daemon-facing tickets land.
+- The core logic (schema decoding, issue normalization, priority selection) is correct and well-tested. Previous critical issues (Effect.sync/defect promotion, missing terminal state) have been resolved. The two remaining concerns — defect propagation crashing the polling loop, and missing test script — are real but non-blocking for this tracer-bullet stage.
+- `apps/cli/src/orchestrator.ts` (defect handling in poll loop) and `apps/cli/package.json` (missing test script).
 
 <h3>Important Files Changed</h3>
 
@@ -79,11 +168,11 @@ This PR implements the first end-to-end Orca tracer bullet: it boots from `orca.
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/index.ts | CLI entrypoint with flag definitions and a top-level error handler; the handler silently drops `ConfigLoadError`'s `path`/`cause` details, showing only the tag name to the user. |
-| apps/cli/src/linear.ts | GraphQL client, PR URL normalization, and issue normalization; `decodeActiveIssuesResponse` now correctly uses `Schema.decodeUnknownEffect` for typed failures; `blockers` is a known stub always set to `[]`. |
-| apps/cli/src/orca-config.ts | Config schema and loader using `Schema.decodeUnknownEffect` (typed failures); `ConfigLoadError` is surfaced as a typed error but its human-readable `cause` is not exposed by the top-level handler. |
-| apps/cli/src/orchestrator.ts | Poll loop with `SubscriptionRef` snapshot and structured JSON logging; catch block in `pollOnce` logs `error.message` which loses structured schema error info — minor UX issue. |
-| apps/cli/src/domain.ts | Effect Schema domain types including `NormalizedIssue`, `RuntimeSnapshot`, and `BlockerRef`; `"terminal"` state variant is now present in `NormalizedStateSchema`; `BlockerRefSchema` is defined but intentionally not populated yet. |
+| apps/cli/src/linear.ts | GraphQL query, schema validation (now using `Schema.decodeUnknownEffect`), and issue normalization including the terminal/runnable/linked-pr-detected state machine. The `blockers` field is still a permanent stub (`[]`) with no TODO comment. |
+| apps/cli/src/orchestrator.ts | Infinite polling loop with priority-based issue selection. `Effect.catch` only intercepts typed failures — any defect in the poll pipeline will crash the fiber with no logged output and no recovery. |
+| apps/cli/src/orca-config.ts | Config loading now correctly uses `Schema.decodeUnknownEffect` and `requiredEnvVar` annotations produce human-readable error messages naming the missing env var. |
+| apps/cli/src/domain.ts | Domain schemas look correct. `NormalizedStateSchema` now includes `"terminal"` as a union member. `BlockerRefSchema` is defined but `blockers` is never populated at runtime. |
+| apps/cli/package.json | No `test` script defined — the existing Bun test suite cannot be run via `bun run test` and is absent from CI verification steps. |
 
 </details>
 
@@ -93,96 +182,51 @@ This PR implements the first end-to-end Orca tracer bullet: it boots from `orca.
 
 ```mermaid
 sequenceDiagram
-    participant CLI as orca CLI (index.ts)
-    participant Config as loadOrcaConfig
-    participant Orch as runOrchestrator
-    participant Linear as fetchActiveIssues
-    participant Decode as decodeActiveIssuesResponse
-    participant Snap as buildRuntimeSnapshot
-    participant Ref as SubscriptionRef
+    participant bin as bin.ts
+    participant idx as index.ts
+    participant cfg as orca-config.ts
+    participant orch as orchestrator.ts
+    participant lin as linear.ts
+    participant api as Linear GraphQL API
+    participant snap as SubscriptionRef[RuntimeSnapshot]
 
-    CLI->>Config: import orca.config.ts (dynamic import)
-    Config->>Config: decodeOrcaConfig → Schema.decodeUnknownEffect
-    alt schema error
-        Config-->>CLI: ParseError (typed failure)
-        CLI->>CLI: Effect.catch → console.error + exitCode=1
-    end
-    Config-->>CLI: { config: OrcaConfig, resolvedPath }
-
-    CLI->>Orch: runOrchestrator({ config, configPath, logLevel })
-    Orch->>Ref: SubscriptionRef.make(initial snapshot)
-    Orch->>Orch: log orca.boot.completed
+    bin->>idx: run program
+    idx->>cfg: loadOrcaConfig(configPath)
+    cfg->>cfg: import(configPath) via pathToFileURL
+    cfg->>cfg: Schema.decodeUnknownEffect(OrcaConfigSchema)
+    cfg-->>idx: { config, resolvedPath }
+    idx->>orch: runOrchestrator({ config, configPath, logLevel })
+    orch->>snap: SubscriptionRef.make(emptySnapshot)
+    orch->>orch: log orca.boot.completed
 
     loop every intervalMs
-        Orch->>Linear: fetchActiveIssues(config.linear)
-        Linear->>Linear: POST /graphql (ActiveIssues query)
-        Linear->>Decode: decodeActiveIssuesResponse(payload)
-        Decode->>Decode: Schema.decodeUnknownEffect → ParseError or ActiveIssuesResponse
-        Decode-->>Linear: ActiveIssuesResponse
-        Linear->>Linear: normalizeActiveIssues (dedup PRs, classify state)
-        Linear-->>Orch: NormalizedIssue[]
-
-        Orch->>Snap: buildRuntimeSnapshot(issues)
-        Snap->>Snap: sort by priorityRank → createdAt → identifier
-        Snap->>Snap: selectRunnableIssue (first runnable)
-        Snap-->>Orch: RuntimeSnapshot
-
-        Orch->>Ref: SubscriptionRef.set(snapshotRef, snapshot)
-        Orch->>Orch: log orca.snapshot.updated
-
-        alt poll error (LinearApiError / ParseError / HttpClientError)
-            Orch->>Orch: log orca.linear.poll.failed (error.message)
-        end
+        orch->>lin: fetchActiveIssues(config.linear)
+        lin->>api: POST /graphql (ActiveIssues query)
+        api-->>lin: JSON payload
+        lin->>lin: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
+        lin->>lin: normalizeActiveIssues → LinkedPRs, normalizedState
+        lin-->>orch: NormalizedIssue[]
+        orch->>orch: buildRuntimeSnapshot (sort + selectRunnableIssue)
+        orch->>snap: SubscriptionRef.set(snapshot)
+        orch->>orch: log orca.snapshot.updated
+        orch->>orch: Effect.sleep(intervalMs)
     end
 ```
 
 <!-- greptile_failed_comments -->
-<details><summary><h3>Comments Outside Diff (2)</h3></summary>
+<details><summary><h3>Comments Outside Diff (1)</h3></summary>
 
-1. `apps/cli/src/index.ts`, line 314-325 ([link](https://github.com/peterje/orca2/blob/2e912e636924618ed0e11e00010c59a8a5cfd9a8/apps/cli/src/index.ts#L314-L325)) 
+1. `apps/cli/package.json`, line 17-20 ([link](https://github.com/peterje/orca2/blob/071a7de4e76644a9bef267ad204cff6ee603e001/apps/cli/package.json#L17-L20)) 
 
-   **`ConfigLoadError` details are silently dropped by the error handler**
+   **No `test` script wired into package scripts**
 
-   When `loadOrcaConfig` cannot find or parse the config file, it yields a `ConfigLoadError` with `path` and `cause` fields. When that error reaches this handler, `error instanceof Error` is `true` (because `Data.TaggedError` extends `Error`), so only `error.message` is shown — but `Data.TaggedError` sets `.message` to the tag string `"ConfigLoadError"`, not to a human-readable description. The OS error (e.g. `ENOENT: no such file or directory`) is stored in `cause`, which is never accessed here.
-
-   The user ends up seeing `"ConfigLoadError"` on stderr with no indication of which file failed or why.
-
-   Add a branch that checks for `ConfigLoadError` specifically:
-
-   ```ts
-   import { ConfigLoadError } from "./orca-config"
-
-   Effect.catch((error: unknown) =>
-     Effect.sync(() => {
-       let message: string
-       if (Schema.isSchemaError(error)) {
-         message = String(error.issue)
-       } else if (error instanceof ConfigLoadError) {
-         message = `failed to load config from ${error.path}: ${error.cause instanceof Error ? error.cause.message : String(error.cause)}`
-       } else if (error instanceof Error) {
-         message = error.message
-       } else {
-         message = String(error)
-       }
-
-       console.error(message)
-       process.exitCode = 1
-     }),
-   ),
-   ```
-
-
-2. `apps/cli/src/orchestrator.ts`, line 1205-1209 ([link](https://github.com/peterje/orca2/blob/2e912e636924618ed0e11e00010c59a8a5cfd9a8/apps/cli/src/orchestrator.ts#L1205-L1209)) 
-
-   **Schema errors logged as opaque tag strings in the poll error handler**
-
-   When `decodeActiveIssuesResponse` produces a `ParseError` (a typed Effect failure), it reaches this catch block. Because `ParseError` extends `Error`, the branch `error instanceof Error ? error.message : String(error)` fires — but `ParseError.message` is often the tag name rather than the human-readable parse tree. The structured parse information is available via `String(error.issue)`.
+   The PR ships four test files (`linear.test.ts`, `orca-config.test.ts`, `error-format.test.ts`), but `package.json` has no `"test"` script. The PR verification steps only list `bun run check` and `bun run build` — neither of which executes the test suite. Any CI pipeline that relies on `bun run test` will silently skip all tests.
 
 </details>
 
 <!-- /greptile_failed_comments -->
 
-<sub>Last reviewed commit: 2e912e6</sub></body>
+<sub>Last reviewed commit: 071a7de</sub></body>
   </comment>
 </comments>
 

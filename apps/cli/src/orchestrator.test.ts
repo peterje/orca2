@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
   applyImplementationOutcome,
+  applyManualInterventionState,
   resolveRetryPlan,
 } from "./orchestrator"
 
@@ -78,5 +79,32 @@ describe("orchestrator", () => {
     })
 
     expect(nextState.has(issue.id)).toBe(false)
+  })
+
+  it("preserves the tracked worktree path for manual intervention", () => {
+    const nextState = applyManualInterventionState({
+      issue,
+      issueStates: new Map([
+        [
+          issue.id,
+          {
+            lastError: null,
+            retryCount: 2,
+            retryDueAt: "2026-03-11T12:05:00.000Z",
+            state: "Implementing" as const,
+            worktreePath: "/repo/.orca/worktrees/pet-47",
+          },
+        ],
+      ]),
+      message: "agent failed permanently",
+    })
+
+    expect(nextState.get(issue.id)).toEqual({
+      lastError: "agent failed permanently",
+      retryCount: 2,
+      retryDueAt: null,
+      state: "ManualIntervention",
+      worktreePath: "/repo/.orca/worktrees/pet-47",
+    })
   })
 })

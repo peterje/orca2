@@ -231,6 +231,28 @@ export const applyImplementationOutcome = ({
   })
 }
 
+export const applyManualInterventionState = ({
+  issue,
+  issueStates,
+  message,
+  worktreePath,
+}: {
+  readonly issue: Pick<NormalizedIssue, "id">
+  readonly issueStates: IssueStateMap
+  readonly message: string
+  readonly worktreePath?: string | null | undefined
+}): IssueStateMap =>
+  updateIssueState(issueStates, issue, {
+    lastError: message,
+    retryCount: issueStates.get(issue.id)?.retryCount ?? 0,
+    retryDueAt: null,
+    state: "ManualIntervention",
+    worktreePath:
+      worktreePath === undefined
+        ? issueStates.get(issue.id)?.worktreePath ?? null
+        : worktreePath,
+  })
+
 const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
   log(minimumLogLevel, "Info", "orca.snapshot.updated", {
     active_issue_count: snapshot.activeIssues.length,
@@ -295,14 +317,13 @@ export const runOrchestrator = ({
     const markManualIntervention = (
       issue: NormalizedIssue,
       message: string,
-      worktreePath: string | null,
+      worktreePath?: string | null,
     ) =>
       Ref.update(issueStatesRef, (currentIssueStates) =>
-        updateIssueState(currentIssueStates, issue, {
-          lastError: message,
-          retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
-          retryDueAt: null,
-          state: "ManualIntervention",
+        applyManualInterventionState({
+          issue,
+          issueStates: currentIssueStates,
+          message,
           worktreePath,
         }),
       )
@@ -411,7 +432,7 @@ export const runOrchestrator = ({
             }
 
             if (error instanceof AgentRunnerError) {
-              return markManualIntervention(issue, error.message, null).pipe(
+              return markManualIntervention(issue, error.message).pipe(
                 Effect.andThen(
                   log(
                     logLevel,

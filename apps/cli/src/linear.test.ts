@@ -1,6 +1,13 @@
-import { Effect, Schema } from "effect"
+import { BunServices } from "@effect/platform-bun"
+import { Effect, Layer, Schema } from "effect"
 import { describe, expect, it } from "bun:test"
-import { decodeActiveIssuesResponse, normalizeActiveIssues } from "./linear"
+import { FetchHttpClient } from "effect/unstable/http"
+import {
+  decodeActiveIssuesResponse,
+  fetchActiveIssues,
+  maxActiveIssuePages,
+  normalizeActiveIssues,
+} from "./linear"
 import { buildRuntimeSnapshot } from "./orchestrator"
 
 describe("linear normalization", () => {
@@ -423,5 +430,126 @@ describe("linear normalization", () => {
       "PET-51",
     ])
     expect(snapshot.runnableIssue?.identifier).toBe("PET-50")
+  })
+
+  it("filters terminal issues from runtime snapshots", async () => {
+    const decoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+            nodes: [
+              {
+                id: "issue-10",
+                identifier: "PET-54",
+                title: "still runnable",
+                description: null,
+                branchName: null,
+                priority: 1,
+                createdAt: "2026-03-11T15:00:00.000Z",
+                updatedAt: "2026-03-11T15:05:00.000Z",
+                state: {
+                  id: "state-9",
+                  name: "Todo",
+                  type: "unstarted",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+              },
+              {
+                id: "issue-11",
+                identifier: "PET-55",
+                title: "mismatched terminal state",
+                description: null,
+                branchName: null,
+                priority: 2,
+                createdAt: "2026-03-11T14:00:00.000Z",
+                updatedAt: "2026-03-11T14:05:00.000Z",
+                state: {
+                  id: "state-10",
+                  name: "Done",
+                  type: "completed",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const snapshot = buildRuntimeSnapshot(
+      normalizeActiveIssues(decoded, ["Done", "Canceled"]),
+    )
+
+    expect(snapshot.activeIssues.map((issue) => issue.identifier)).toEqual([
+      "PET-54",
+    ])
+    expect(snapshot.runnableIssue?.identifier).toBe("PET-54")
+  })
+
+  it("fails when linear pagination exceeds the page ceiling", async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+
+    globalThis.fetch = (async () => {
+      requestCount += 1
+
+      return new Response(
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [],
+              pageInfo: {
+                hasNextPage: true,
+                endCursor: `cursor-${requestCount}`,
+              },
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+          },
+        },
+      )
+    }) as unknown as typeof fetch
+
+    try {
+      const failure = await Effect.runPromise(
+        Effect.flip(
+          fetchActiveIssues({
+            apiKey: "linear-api-key",
+            endpoint: "https://api.linear.app/graphql",
+            projectSlug: "orca",
+            activeStates: ["Todo"],
+            terminalStates: ["Done", "Canceled"],
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(BunServices.layer, FetchHttpClient.layer),
+            ),
+          ),
+        ),
+      )
+
+      expect(failure._tag).toBe("LinearApiError")
+      expect(failure.message).toContain(`exceeded ${maxActiveIssuePages} pages`)
+      expect(requestCount).toBe(maxActiveIssuePages)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

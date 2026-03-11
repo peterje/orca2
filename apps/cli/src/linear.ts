@@ -299,12 +299,23 @@ export interface LinearConfig {
   readonly terminalStates: ReadonlyArray<string>
 }
 
+export const maxActiveIssuePages = 50
+
 export const fetchActiveIssues = (config: LinearConfig) =>
   Effect.gen(function* () {
     const nodes: Array<RawIssue> = []
     let after: string | null = null
+    let pageCount = 0
 
     while (true) {
+      pageCount += 1
+
+      if (pageCount > maxActiveIssuePages) {
+        return yield* new LinearApiError({
+          message: `linear active issue pagination exceeded ${maxActiveIssuePages} pages`,
+        })
+      }
+
       const page: ActiveIssuesPage = yield* fetchActiveIssuesPage({
         config,
         after,

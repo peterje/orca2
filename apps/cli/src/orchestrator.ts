@@ -50,11 +50,17 @@ export const selectRunnableIssue = (
 
 export const buildRuntimeSnapshot = (
   issues: RuntimeSnapshot["activeIssues"],
-): RuntimeSnapshot => ({
-  updatedAt: new Date().toISOString(),
-  activeIssues: [...issues].sort(compareIssues),
-  runnableIssue: selectRunnableIssue(issues),
-})
+): RuntimeSnapshot => {
+  const activeIssues = issues
+    .filter((issue) => issue.normalizedState !== "terminal")
+    .sort(compareIssues)
+
+  return {
+    updatedAt: new Date().toISOString(),
+    activeIssues,
+    runnableIssue: selectRunnableIssue(activeIssues),
+  }
+}
 
 const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
   log(minimumLogLevel, "Info", "orca.snapshot.updated", {

@@ -138,7 +138,15 @@ const normalizeLinkedPullRequests = (
     const number = Number(numberText)
     const key = `${owner}/${repo}#${number}`
 
-    if (deduped.has(key)) {
+    const existing = deduped.get(key)
+    if (existing) {
+      if (existing.title === null && attachment.title !== null) {
+        deduped.set(key, {
+          ...existing,
+          title: attachment.title,
+        })
+      }
+
       continue
     }
 

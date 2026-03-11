@@ -43,7 +43,7 @@ const validConfig = {
   greptile: {
     enabled: true,
     summonComment: "@greptileai",
-    requiredScore: 5,
+    requiredScore: 4,
   },
   humanReview: {
     requireApproval: true,
@@ -131,7 +131,7 @@ describe("orca config", () => {
   greptile: {
     enabled: true,
     summonComment: "@greptileai",
-    requiredScore: 5
+    requiredScore: 4
   },
   humanReview: {
     requireApproval: true,

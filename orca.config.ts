@@ -34,7 +34,7 @@ export default {
   greptile: {
     enabled: true,
     summonComment: "@greptileai",
-    requiredScore: 5,
+    requiredScore: 4,
   },
   humanReview: {
     requireApproval: true,

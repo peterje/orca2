@@ -72,6 +72,71 @@ describe("linear normalization", () => {
     expect(issues[0]?.runnable).toBe(false)
   })
 
+  it("prefers a later non-null pull request title when deduplicating", async () => {
+    const decoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "issue-9",
+                identifier: "PET-53",
+                title: "dedupe pull request titles",
+                description: null,
+                branchName: null,
+                priority: 2,
+                createdAt: "2026-03-11T14:00:00.000Z",
+                updatedAt: "2026-03-11T14:05:00.000Z",
+                state: {
+                  id: "state-8",
+                  name: "In Progress",
+                  type: "started",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [
+                    {
+                      id: "attachment-10",
+                      title: null,
+                      subtitle: null,
+                      url: "https://github.com/peterje/orca2/pull/100",
+                      metadata: {},
+                      sourceType: "github",
+                    },
+                    {
+                      id: "attachment-11",
+                      title: "fix: auth token refresh",
+                      subtitle: null,
+                      url: "https://github.com/peterje/orca2/pull/100",
+                      metadata: {},
+                      sourceType: "github",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const issues = normalizeActiveIssues(decoded, ["Done", "Canceled"])
+
+    expect(issues[0]?.linkedPullRequests).toEqual([
+      {
+        provider: "github",
+        owner: "peterje",
+        repo: "orca2",
+        number: 100,
+        url: "https://github.com/peterje/orca2/pull/100",
+        title: "fix: auth token refresh",
+        attachmentId: "attachment-10",
+      },
+    ])
+  })
+
   it("fails with a schema error for invalid linear payloads", async () => {
     const failure = await Effect.runPromise(
       Effect.flip(

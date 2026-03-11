@@ -314,6 +314,62 @@ describe("orchestrator", () => {
     expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
   })
 
+  it("returns to waiting for pr when a branch-associated pr disappears", () => {
+    const nextState = updateIssueStateForGitHubInspection({
+      issue,
+      issueStates: new Map([
+        [
+          issue.id,
+          {
+            branchName: "pet-47",
+            checkSummary: {
+              failedCount: 0,
+              pendingCount: 1,
+              status: "pending",
+              successfulCount: 0,
+              totalCount: 1,
+            },
+            currentHeadSha: "def456",
+            currentPullRequest: {
+              baseRefName: "main",
+              headRefName: "pet-47",
+              headSha: "def456",
+              isDraft: false,
+              number: 42,
+              owner: "peterje",
+              provider: "github" as const,
+              repo: "orca2",
+              state: "open" as const,
+              title: "feat: run implementation attempts",
+              url: "https://github.com/peterje/orca2/pull/42",
+            },
+            lastError: null,
+            retryCount: 0,
+            retryDueAt: null,
+            state: "WaitingForCi" as const,
+            worktreePath: "/repo/.orca/worktrees/pet-47",
+          },
+        ],
+      ]),
+      inspection: {
+        branchNames: ["pet-47"],
+        kind: "missing-pr",
+      },
+    })
+
+    expect(nextState.get(issue.id)).toEqual({
+      branchName: "pet-47",
+      checkSummary: null,
+      currentHeadSha: null,
+      currentPullRequest: null,
+      lastError: null,
+      retryCount: 0,
+      retryDueAt: null,
+      state: "WaitingForPr",
+      worktreePath: "/repo/.orca/worktrees/pet-47",
+    })
+  })
+
   it("enters manual intervention when github state is ambiguous", () => {
     const nextState = updateIssueStateForGitHubInspection({
       issue,

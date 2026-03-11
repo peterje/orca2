@@ -246,7 +246,14 @@ export const updateIssueStateForGitHubInspection = ({
   }
 
   if (inspection.kind === "missing-pr") {
-    if (currentIssueState?.state !== "WaitingForPr") {
+    if (
+      currentIssueState === undefined ||
+      ![
+        "WaitingForAiReview",
+        "WaitingForCi",
+        "WaitingForPr",
+      ].includes(currentIssueState.state)
+    ) {
       return issueStates
     }
 

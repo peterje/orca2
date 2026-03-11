@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "private": true,
   "bin": {
-    "grepline": "./dist/bin.mjs"
+    "orca": "./dist/bin.mjs"
   },
   "exports": {
     ".": "./src/index.ts"

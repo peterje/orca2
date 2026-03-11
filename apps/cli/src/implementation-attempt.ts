@@ -10,6 +10,14 @@ import { buildImplementationPrompt } from "./prompts"
 
 export const shortMissingPrRetryMs = 1_000
 
+type RefreshIssues = ReturnType<typeof fetchActiveIssues> extends Effect.Effect<
+  infer Success,
+  any,
+  infer Requirements
+>
+  ? () => Effect.Effect<Success, unknown, Requirements>
+  : never
+
 export interface ImplementationAttemptOutcome {
   readonly branchName: string
   readonly state: "LinkedPrDetected" | "WaitingForPr"
@@ -44,7 +52,7 @@ export const runImplementationAttempt = ({
     issue: NormalizedIssue,
   ) => Effect.Effect<WorktreeHandle, WorktreeError>
   readonly issue: NormalizedIssue
-  readonly refreshIssues?: () => ReturnType<typeof fetchActiveIssues>
+  readonly refreshIssues?: RefreshIssues
   readonly runAgent?: (params: {
     readonly cwd: string
     readonly prompt: string
@@ -66,7 +74,7 @@ export const runImplementationAttempt = ({
       Effect.map((issues) =>
         issues.find((candidate) => candidate.id === issue.id),
       ),
-      Effect.catchTag("LinearApiError", () =>
+      Effect.catch(() =>
         Effect.sync(() => undefined as NormalizedIssue | undefined),
       ),
     )

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test"
-import { applyImplementationOutcome } from "./orchestrator"
+import {
+  applyImplementationOutcome,
+  resolveRetryPlan,
+} from "./orchestrator"
 
 const issue = {
   blockers: [],
@@ -20,6 +23,21 @@ const issue = {
 }
 
 describe("orchestrator", () => {
+  it("escalates retryable failures to manual intervention after max retries", () => {
+    expect(
+      resolveRetryPlan({
+        maxRetries: 2,
+        maxRetryBackoffMs: 60_000,
+        retryCount: 2,
+        now: Date.UTC(2026, 2, 11, 12, 0, 0),
+      }),
+    ).toEqual({
+      retryCount: 3,
+      retryDueAt: null,
+      state: "ManualIntervention",
+    })
+  })
+
   it("clears an implementing issue when Linear already reports a linked pr", () => {
     const nextState = applyImplementationOutcome({
       activeIssues: [

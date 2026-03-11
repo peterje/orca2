@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Data, Effect } from "effect"
 import { BunServices } from "@effect/platform-bun"
 import { afterEach, describe, expect, it } from "bun:test"
 import { FetchHttpClient } from "effect/unstable/http"
@@ -17,6 +17,12 @@ import { LinearApiError } from "./linear"
 
 const execFileAsync = promisify(execFile)
 const tempDirectories = new Set<string>()
+
+class TemporaryRefreshError extends Data.TaggedError(
+  "TemporaryRefreshError",
+)<{
+  readonly message: string
+}> {}
 
 afterEach(async () => {
   await Promise.all(
@@ -68,6 +74,7 @@ const issue = {
 
 const baseConfig = {
   agent: {
+    maxRetries: 5,
     maxRetryBackoffMs: 300_000,
     maxTurns: 1,
   },
@@ -228,6 +235,42 @@ describe("implementation attempt", () => {
           Effect.fail(
             new LinearApiError({
               message: "temporary linear outage",
+            }),
+          ),
+        runAgent: () => Effect.void,
+        sleep: () => Effect.void,
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(BunServices.layer, FetchHttpClient.layer),
+        ),
+      ),
+    )
+
+    expect(outcome.state).toBe("WaitingForPr")
+    expect(outcome.worktreePath).toBe("/repo/.orca/worktrees/pet-47")
+  })
+
+  it("treats a transient transport refresh failure as waiting for pr", async () => {
+    const outcome = await Effect.runPromise(
+      runImplementationAttempt({
+        config: {
+          ...baseConfig,
+          worktree: {
+            repoRoot: "/repo",
+            root: "/repo/.orca/worktrees",
+          },
+        },
+        ensureWorktree: () =>
+          Effect.succeed({
+            branchName: "pet-47",
+            path: "/repo/.orca/worktrees/pet-47",
+            reused: true,
+          }),
+        issue,
+        refreshIssues: () =>
+          Effect.fail(
+            new TemporaryRefreshError({
+              message: "temporary network reset during refresh",
             }),
           ),
         runAgent: () => Effect.void,

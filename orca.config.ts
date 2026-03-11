@@ -21,6 +21,7 @@ export default {
     root: ".orca/worktrees",
   },
   agent: {
+    maxRetries: 5,
     maxTurns: 12,
     maxRetryBackoffMs: 300_000,
   },

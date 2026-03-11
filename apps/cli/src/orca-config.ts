@@ -37,6 +37,7 @@ export const OrcaConfigSchema = Schema.Struct({
     root: Schema.String,
   }),
   agent: Schema.Struct({
+    maxRetries: Schema.Number,
     maxTurns: Schema.Number,
     maxRetryBackoffMs: Schema.Number,
   }),

@@ -30,6 +30,7 @@ const validConfig = {
     root: ".orca/worktrees",
   },
   agent: {
+    maxRetries: 5,
     maxTurns: 12,
     maxRetryBackoffMs: 300_000,
   },
@@ -137,6 +138,7 @@ describe("orca config", () => {
     root: ".orca/worktrees"
   },
   agent: {
+    maxRetries: 5,
     maxTurns: 12,
     maxRetryBackoffMs: 300000
   },

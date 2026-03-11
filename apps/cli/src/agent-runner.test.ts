@@ -7,6 +7,7 @@ import {
 
 const baseConfig = {
   agent: {
+    maxRetries: 5,
     maxRetryBackoffMs: 1_000,
     maxTurns: 1,
   },

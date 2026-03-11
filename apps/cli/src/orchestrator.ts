@@ -25,6 +25,39 @@ interface IssueExecutionState {
 
 type IssueStateMap = ReadonlyMap<string, IssueExecutionState>
 
+export const resolveRetryPlan = ({
+  maxRetries,
+  maxRetryBackoffMs,
+  retryCount,
+  now = Date.now(),
+}: {
+  readonly maxRetries: number
+  readonly maxRetryBackoffMs: number
+  readonly retryCount: number
+  readonly now?: number
+}) => {
+  const nextRetryCount = retryCount + 1
+
+  if (nextRetryCount > maxRetries) {
+    return {
+      retryCount: nextRetryCount,
+      retryDueAt: null,
+      state: "ManualIntervention" as const,
+    }
+  }
+
+  const backoffMs = Math.min(
+    1_000 * 2 ** (nextRetryCount - 1),
+    maxRetryBackoffMs,
+  )
+
+  return {
+    retryCount: nextRetryCount,
+    retryDueAt: new Date(now + backoffMs).toISOString(),
+    state: "RetryQueued" as const,
+  }
+}
+
 const compareIssues = (
   left: RuntimeSnapshot["activeIssues"][number],
   right: RuntimeSnapshot["activeIssues"][number],
@@ -240,20 +273,19 @@ export const runOrchestrator = ({
     const markRetryQueued = (issue: NormalizedIssue, error: AgentRunnerError) =>
       Effect.gen(function* () {
         const currentIssueStates = yield* Ref.get(issueStatesRef)
-        const nextRetryCount =
-          (currentIssueStates.get(issue.id)?.retryCount ?? 0) + 1
-        const backoffMs = Math.min(
-          1_000 * 2 ** (nextRetryCount - 1),
-          config.agent.maxRetryBackoffMs,
-        )
+        const retryPlan = resolveRetryPlan({
+          maxRetries: config.agent.maxRetries,
+          maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
+          retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
+        })
 
         yield* Ref.set(
           issueStatesRef,
           updateIssueState(currentIssueStates, issue, {
             lastError: error.message,
-            retryCount: nextRetryCount,
-            retryDueAt: new Date(Date.now() + backoffMs).toISOString(),
-            state: "RetryQueued",
+            retryCount: retryPlan.retryCount,
+            retryDueAt: retryPlan.retryDueAt,
+            state: retryPlan.state,
             worktreePath:
               currentIssueStates.get(issue.id)?.worktreePath ?? null,
           }),
@@ -323,14 +355,29 @@ export const runOrchestrator = ({
           Effect.catch((error: unknown) => {
             if (error instanceof AgentRunnerError && error.retryable) {
               return markRetryQueued(issue, error).pipe(
-                Effect.andThen(
-                  log(logLevel, "Warn", "orca.issue.dispatch.retry-queued", {
-                    issue_id: issue.id,
-                    issue_identifier: issue.identifier,
-                    message: error.message,
-                    state: "RetryQueued",
-                  }),
-                ),
+                Effect.flatMap(() => Ref.get(issueStatesRef)),
+                Effect.flatMap((issueStates) => {
+                  const state = issueStates.get(issue.id)?.state
+
+                  return state === "ManualIntervention"
+                    ? log(
+                        logLevel,
+                        "Error",
+                        "orca.issue.dispatch.manual-intervention",
+                        {
+                          issue_id: issue.id,
+                          issue_identifier: issue.identifier,
+                          message: error.message,
+                          state: "ManualIntervention",
+                        },
+                      )
+                    : log(logLevel, "Warn", "orca.issue.dispatch.retry-queued", {
+                        issue_id: issue.id,
+                        issue_identifier: issue.identifier,
+                        message: error.message,
+                        state: "RetryQueued",
+                      })
+                }),
               )
             }
 

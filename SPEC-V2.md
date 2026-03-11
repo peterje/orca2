@@ -129,6 +129,7 @@ export default {
     root: ".orca/worktrees"
   },
   agent: {
+    maxRetries: 5,
     maxTurns: 12,
     maxRetryBackoffMs: 300_000
   },
@@ -441,6 +442,7 @@ Orca is intentionally poll-only.
   - then `WaitingForPr`
 - agent failure:
   - exponential backoff capped by `agent.maxRetryBackoffMs`
+  - after `agent.maxRetries`, escalate to `ManualIntervention`
 - GitHub or Greptile ambiguity:
   - do not thrash
   - enter `ManualIntervention`

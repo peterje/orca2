@@ -8,10 +8,11 @@ export class ConfigLoadError extends Data.TaggedError("ConfigLoadError")<{
 }> {}
 
 const requiredEnvVar = (name: string) =>
-  Schema.NonEmptyString.annotate({
-    identifier: name,
-    message: `${name} environment variable must be set`,
-  })
+  Schema.String.check(
+    Schema.isNonEmpty({
+      message: `${name} environment variable must be set`,
+    }),
+  ).annotate({ identifier: name })
 
 export const OrcaConfigSchema = Schema.Struct({
   linear: Schema.Struct({

@@ -26,242 +26,35 @@ Build the first end-to-end Orca tracer bullet: start from `orca.config.ts`, vali
 
 Confidence: 4/5
 
-## Unresolved review threads
-
-<comment author="greptile-apps" path="apps/cli/src/index.ts">
-  <diffHunk><![CDATA[
-@@ -1,11 +1,49 @@
- import { BunServices } from "@effect/platform-bun"
--import { Console, Effect } from "effect"
--import { Command } from "effect/unstable/cli"
-+import { Effect, Layer } from "effect"
-+import { FetchHttpClient } from "effect/unstable/http"
-+import { Command, Flag } from "effect/unstable/cli"
-+import { formatErrorMessage } from "./error-format"
-+import { writeLogLine } from "./logging"
-+import { runOrchestrator } from "./orchestrator"
-+import { appLogLevels } from "./logging"
-  ]]></diffHunk>
-  <lineNumber>8</lineNumber>
-  <body>**Duplicate imports from the same module**
-
-`writeLogLine` and `appLogLevels` are both imported from `"./logging"` in two separate import statements. These should be merged into a single import to follow standard module hygiene.
-
-```suggestion
-import { appLogLevels, writeLogLine } from "./logging"
-```
-
-
-<sub>Note: If this suggestion doesn't match your team's coding style, reply to this and let me know. I'll remember it for next time!</sub></body>
-</comment>
-<comment author="greptile-apps" path="apps/cli/src/domain.ts">
-  <diffHunk><![CDATA[
-@@ -0,0 +1,71 @@
-+import { Schema } from "effect"
-+
-+const NormalizedStateSchema = Schema.Union([
-+  Schema.Literal("runnable"),
-+  Schema.Literal("linked-pr-detected"),
-+  Schema.Literal("terminal"),
-+])
-+
-+export const LinkedPullRequestRefSchema = Schema.Struct({
-+  provider: Schema.Literal("github"),
-+  owner: Schema.String,
-+  repo: Schema.String,
-+  number: Schema.Number,
-+  url: Schema.String,
-+  title: Schema.NullOr(Schema.String),
-+  attachmentId: Schema.String,
-+})
-+
-+export type LinkedPullRequestRef = Schema.Schema.Type<
-+  typeof LinkedPullRequestRefSchema
-+>
-+
-+export const BlockerRefSchema = Schema.Struct({
-+  id: Schema.String,
-+  identifier: Schema.String,
-+  title: Schema.String,
-+  stateName: Schema.String,
-+  terminal: Schema.Boolean,
-+})
-+
-+export type BlockerRef = Schema.Schema.Type<typeof BlockerRefSchema>
-+
-+export const NormalizedIssueSchema = Schema.Struct({
-+  id: Schema.String,
-+  identifier: Schema.String,
-+  title: Schema.String,
-+  description: Schema.NullOr(Schema.String),
-+  branchName: Schema.NullOr(Schema.String),
-+  priority: Schema.Number,
-+  priorityRank: Schema.Number,
-+  createdAt: Schema.String,
-+  updatedAt: Schema.String,
-+  stateName: Schema.String,
-+  stateType: Schema.NullOr(Schema.String),
-+  labels: Schema.Array(Schema.String),
-+  linkedPullRequests: Schema.Array(LinkedPullRequestRefSchema),
-+  blockers: Schema.Array(BlockerRefSchema),
-+  normalizedState: NormalizedStateSchema,
-+  runnable: Schema.Boolean,
-  ]]></diffHunk>
-  <lineNumber>49</lineNumber>
-  <body>**`runnable` is always derivable from `normalizedState`**
-
-`NormalizedIssueSchema` carries both `runnable: boolean` and `normalizedState`, where `runnable` is always equivalent to `normalizedState === "runnable"`. Having both fields means every code path that constructs a `NormalizedIssue` (and any future ones) must keep them in sync manually. For example, `orchestrator.ts` uses `issue.runnable` for filtering while the same information is available via `normalizedState`.
-
-Consider removing `runnable` from the schema and deriving it at call sites:
-
-```ts
-// in orchestrator.ts
-.filter((issue) => issue.normalizedState === "runnable")
-```
-
-This eliminates the redundant field and prevents any future divergence between the two values.
-</body>
-</comment>
-<comment author="greptile-apps" path="apps/cli/src/orchestrator.ts">
-  <diffHunk><![CDATA[
-@@ -0,0 +1,105 @@
-+import { Cause, Duration, Effect, Ref } from "effect"
-+import type { RuntimeSnapshot, SelectedRunnableIssue } from "./domain"
-+import { formatErrorMessage } from "./error-format"
-+import { fetchActiveIssues } from "./linear"
-+import type { AppLogLevel } from "./logging"
-+import { log } from "./logging"
-+import type { OrcaConfig } from "./orca-config"
-+
-+const compareIssues = (
-+  left: RuntimeSnapshot["activeIssues"][number],
-+  right: RuntimeSnapshot["activeIssues"][number],
-+) => {
-+  const priorityDifference = left.priorityRank - right.priorityRank
-+  if (priorityDifference !== 0) {
-+    return priorityDifference
-+  }
-+
-+  const leftCreatedAtTime = new Date(left.createdAt).getTime()
-+  const rightCreatedAtTime = new Date(right.createdAt).getTime()
-+  const createdAtDifference =
-+    Number.isFinite(leftCreatedAtTime) && Number.isFinite(rightCreatedAtTime)
-+      ? leftCreatedAtTime - rightCreatedAtTime
-+      : 0
-+  if (createdAtDifference !== 0) {
-+    return createdAtDifference
-+  }
-+
-+  return left.identifier.localeCompare(right.identifier)
-+}
-+
-+export const selectRunnableIssue = (
-+  issues: RuntimeSnapshot["activeIssues"],
-+): SelectedRunnableIssue | null => {
-+  const runnableIssues = issues
-+    .filter((issue) => issue.runnable)
-+    .sort(compareIssues)
-+  const selectedIssue = runnableIssues[0]
-+
-+  if (!selectedIssue) {
-+    return null
-+  }
-+
-+  return {
-+    id: selectedIssue.id,
-+    identifier: selectedIssue.identifier,
-+    title: selectedIssue.title,
-+    normalizedState: "runnable",
-+  }
-+}
-+
-+export const buildRuntimeSnapshot = (
-+  issues: RuntimeSnapshot["activeIssues"],
-+): RuntimeSnapshot => ({
-+  updatedAt: new Date().toISOString(),
-+  activeIssues: [...issues].sort(compareIssues),
-+  runnableIssue: selectRunnableIssue(issues),
-+})
-+
-+const logSnapshot = (minimumLogLevel: AppLogLevel, snapshot: RuntimeSnapshot) =>
-+  log(minimumLogLevel, "Info", "orca.snapshot.updated", {
-+    active_issue_count: snapshot.activeIssues.length,
-+    runnable_issue_identifier: snapshot.runnableIssue?.identifier ?? null,
-+    snapshot,
-+  })
-+
-+export const runOrchestrator = ({
-+  config,
-+  configPath,
-+  logLevel,
-+}: {
-+  readonly config: OrcaConfig
-+  readonly configPath: string
-+  readonly logLevel: AppLogLevel
-+}) =>
-+  Effect.gen(function* () {
-+    const snapshotRef = yield* Ref.make<RuntimeSnapshot>({
-+      updatedAt: new Date(0).toISOString(),
-+      activeIssues: [],
-+      runnableIssue: null,
-+    })
-+
-+    yield* log(logLevel, "Info", "orca.boot.completed", {
-+      config_path: configPath,
-+      polling_interval_ms: config.polling.intervalMs,
-+      linear_project_slug: config.linear.projectSlug,
-+    })
-+
-+    const pollOnce = fetchActiveIssues(config.linear).pipe(
-+      Effect.map(buildRuntimeSnapshot),
-+      Effect.tap((snapshot) => Ref.set(snapshotRef, snapshot)),
-+      Effect.tap((snapshot) => logSnapshot(logLevel, snapshot)),
-+      Effect.catchCause((cause: Cause.Cause<unknown>) =>
-+        Cause.hasInterrupts(cause)
-+          ? Effect.failCause(cause)
-+          : log(logLevel, "Error", "orca.linear.poll.failed", {
-+              message: formatErrorMessage(Cause.squash(cause)),
-+            }),
-+      ),
-+    )
-+
-+    while (true) {
-+      yield* pollOnce
-+      yield* Effect.sleep(Duration.millis(config.polling.intervalMs))
-+    }
-  ]]></diffHunk>
-  <lineNumber>104</lineNumber>
-  <body>**Poll interval measures elapsed-time-between-completions, not between starts**
-
-The current loop sleeps *after* the poll completes:
-```
-poll (takes T ms) → sleep(intervalMs) → poll → ...
-```
-This means the actual time between poll *starts* is `intervalMs + T` (poll duration). For the 5 s default interval, a slow Linear API call (e.g. 2 s) would produce a 7 s effective period. If Orca ever needs tighter cadence guarantees, the sleep should be scheduled relative to the wall-clock time the poll *started* (e.g. using `Effect.race` with a timeout, or computing the remaining sleep time). For the current bootstrap scope this is low-risk, but worth documenting with a comment so future maintainers understand the semantics.
-</body>
-</comment>
-
 ## General comments
 
 <comments>
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR implements the Orca bootstrap: config validation via Effect Schema, a paginated Linear polling loop, GitHub PR attachment normalization, and an in-memory orchestrator snapshot — closing PET-46. The implementation addresses the majority of issues raised in the previous review cycle (switching to `Schema.decodeUnknownEffect`, adding the `"terminal"` state variant, fixing the `...fields` spread order in logging, implementing full pagination, re-raising fiber interrupts on SIGTERM, and replacing `SubscriptionRef` with `Ref`).
+This PR delivers the first end-to-end Orca tracer bullet: schema-validated config loading, a paginated Linear polling loop, issue normalization with linked PR deduplication, a priority-ranked orchestrator snapshot, and structured NDJSON logging throughout. It directly implements the acceptance criteria from PET-46.
 
-Key observations:
-- The `message` annotation on `requiredEnvVar` in `orca-config.ts` is still a plain string literal; Effect Schema v4 expects this to be a `(issue: ParseIssue) => string` function. If the runtime calls it as a function, a `TypeError` would be thrown and the custom env-var name would never appear in the error output.
-- `NormalizedIssueSchema` carries both `runnable: boolean` and `normalizedState`, where `runnable` is always `normalizedState === "runnable"` — removing the redundant field would eliminate a future inconsistency surface.
-- `index.ts` has two separate `import` statements from `"./logging"` that should be merged.
-- The polling loop sleeps *after* each poll completes, so the effective cadence is `intervalMs + poll duration`; this is reasonable for the current scope but worth documenting.
-- The `blockers` field is correctly stubbed with a `// TODO` comment, and `snapshotRef` is intentionally internal for this tracer-bullet iteration.
+**What was addressed from prior review threads:**
+- `Schema.decodeUnknownEffect` is now used consistently in both `orca-config.ts` and `linear.ts`, so `ParseError` reaches the typed `E` channel and is formatted correctly on boot failure
+- Pagination is fully implemented in `fetchActiveIssues` via a `while`/`pageInfo` loop — the `first: 100` truncation concern is resolved
+- `normalizedState` correctly carries a three-way `"runnable" | "linked-pr-detected" | "terminal"` union, including the `"cancelled"` state type as a terminal guard
+- `attachmentId` is updated alongside `title` when a null-title deduplication upgrade fires (test at `linear.test.ts:143` confirms `"attachment-11"`)
+- `catchCause` correctly re-raises interrupt causes via `Cause.hasInterrupts`, enabling clean SIGTERM shutdown
+- Poll interval now measures elapsed wall-clock time and sleeps only the remainder, keeping cadence close to `intervalMs`
+- `snapshotRef` is a plain `Ref` (not `SubscriptionRef`); the pub/sub overhead concern is gone
+- Startup errors now route through `writeLogLine` for consistent NDJSON output
+- Duplicate `"./logging"` imports are merged into one statement
+- `requiredScore` is set to `4` to match the actual Greptile review confidence for this PR
 
+**Remaining known items (tracked in prior threads, not new):**
+- The `message` annotation on `requiredEnvVar` is a plain string rather than a `(issue: ParseIssue) => string` function; the `identifier` annotation carries the env-var name into error output and is what the tests assert against
+- `blockers: []` is a documented stub with a `// TODO` comment pending the dependency-discovery milestone
 
 <h3>Confidence Score: 4/5</h3>
 
-- Safe to merge with minor follow-ups; core logic is sound and the majority of prior review concerns have been addressed.
-- The iteration resolves almost all previously flagged issues — correct Effect error channels, full pagination, graceful interrupt handling, structured startup logging, and the `cancelled` terminal type. The remaining open items are: (1) the `requiredEnvVar` message annotation is still a plain string, which could silently suppress the custom env-var hint at runtime; (2) the redundant `runnable` field in the domain schema; (3) a minor duplicate import in `index.ts`. None of these block correctness for the bootstrap scope.
-- apps/cli/src/orca-config.ts (message annotation type), apps/cli/src/domain.ts (redundant runnable field)
+- PR is safe to merge — all previously flagged critical issues have been addressed; remaining items are known stubs or minor annotation nuances tracked in prior threads.
+- All blocking concerns from the previous review round (sync decoders producing defects, missing pagination, interrupt swallowing, poll-interval drift, attachmentId/title mismatch, missing "terminal" state) have been resolved in this iteration. The two remaining open items — the `message` annotation as a plain string and the `blockers: []` stub — are low-risk and already documented. No new logic bugs were found during this review.
+- No files require special attention. `apps/cli/src/orca-config.ts` carries the known `message` annotation issue but it does not affect correctness of the error output as asserted by the existing tests.
 
 <h3>Important Files Changed</h3>
 
@@ -270,16 +63,11 @@ Key observations:
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/linear.ts | Core Linear API integration: adds `decodeActiveIssuesResponse` (now correctly using `Schema.decodeUnknownEffect`), full pagination loop, GitHub PR attachment normalization with null-title deduplication, and `cancelled` state-type terminal detection. Previously flagged issues around sync schema decoding, missing `cancelled` guard, and deduplication `attachmentId` mismatch are all addressed. |
-| apps/cli/src/orchestrator.ts | Polling loop and snapshot management: uses `Ref.make` (replacing `SubscriptionRef`), re-raises fiber interrupt causes via `Cause.hasInterrupts`, and correctly guards `NaN` timestamps in `compareIssues`. The sleep-after-poll pattern means effective polling cadence is `intervalMs + poll duration`, which is worth documenting. |
-| apps/cli/src/orca-config.ts | Config schema and loader: `decodeOrcaConfig` now uses `Schema.decodeUnknownEffect`, eliminating the previous defect risk. The `requiredEnvVar` helper annotates missing env var errors with the variable name; the `message` annotation is still a plain string (Effect Schema v4 expects a function), which is an outstanding concern from the prior review cycle. |
-| apps/cli/src/domain.ts | Domain schema definitions: `NormalizedStateSchema` now correctly includes the `"terminal"` literal, and `attachmentId` was tightened to non-nullable `Schema.String`. Both `runnable: boolean` and `normalizedState` are present — the former is fully derivable from the latter, creating a small redundancy maintenance surface. |
-| apps/cli/src/index.ts | CLI entry point: startup errors now route through `writeLogLine` producing structured NDJSON (resolving the prior mixed-format concern). Two separate imports from `"./logging"` should be merged into one. |
-| apps/cli/src/logging.ts | Structured logging utilities: `...fields` spread now comes before reserved keys (`timestamp`, `level`, `event`) so reserved keys always win, resolving the prior silent-overwrite concern. `shouldLog` logic is correct. |
-| orca.config.ts | Bootstrap Orca config: `requiredScore` is correctly set to `4` (down from `5`), resolving the self-gating concern. Env vars are sourced from `process.env.*` and validated via the schema's `requiredEnvVar` annotation. |
-| apps/cli/src/linear.test.ts | Comprehensive test coverage for normalization: covers deduplication with null-title promotion (asserting `attachmentId: "attachment-11"` correctly), terminal state detection via both `terminalStates` list and `state.type`, priority/age/identifier sort ordering, and invalid timestamp fallback. |
-| apps/cli/src/orca-config.test.ts | Config decode and file-load tests: validates happy path, schema failure with env-var name in message, and dynamic TypeScript file loading. Tests cover the key acceptance criteria for config validation. |
-| apps/cli/src/error-format.ts | Error formatting helper: handles `Schema.isSchemaError`, `ConfigLoadError`, generic `Error`, and string fallback. No issues found. |
+| apps/cli/src/linear.ts | Core Linear API integration: implements paginated `fetchActiveIssues`, schema-safe `decodeActiveIssuesResponse`, PR-ref deduplication with null-title preference, and full three-way `normalizedState` classification including `"cancelled"` type detection. Previously flagged issues (sync decoder, missing pagination, attachmentId mismatch, `cancelled` terminal guard) are all addressed. |
+| apps/cli/src/orchestrator.ts | Polling loop correctly re-raises interrupt causes via `Cause.hasInterrupts`, measures elapsed time to maintain consistent poll cadence, uses plain `Ref` instead of `SubscriptionRef`, and catches all causes including defects. All previously flagged concerns (interrupt swallowing, NaN sort, poll interval drift, SubscriptionRef overhead) have been addressed. |
+| apps/cli/src/orca-config.ts | Config decoding now correctly uses `Schema.decodeUnknownEffect` (typed failure, not defect). The `requiredEnvVar` helper annotates the schema with `identifier` (which drives error string output) and `message`. The `message` value is a plain string rather than a function — a known concern flagged in a prior thread. |
+| apps/cli/src/index.ts | Startup errors now route through structured `writeLogLine` (NDJSON), resolving the plain-text vs JSON inconsistency flagged previously. Duplicate imports from `"./logging"` have been collapsed into a single statement. Layering of `BunServices` and `FetchHttpClient` looks correct. |
+| apps/cli/src/domain.ts | Schemas look clean: `NormalizedStateSchema` now includes the `"terminal"` literal, `attachmentId` is `Schema.String` (non-nullable, consistent with `normalizeLinkedPullRequests`), and the redundant `runnable: boolean` field has been removed from `NormalizedIssueSchema`. |
 
 </details>
 
@@ -289,42 +77,45 @@ Key observations:
 
 ```mermaid
 sequenceDiagram
-    participant Main as BunRuntime
-    participant CLI as cli (index.ts)
-    participant Config as loadOrcaConfig
+    participant CLI as index.ts (CLI)
+    participant OC as loadOrcaConfig
     participant Orch as runOrchestrator
     participant Linear as fetchActiveIssues
-    participant Ref as snapshotRef (Ref)
+    participant LA as Linear API
 
-    Main->>CLI: run program
-    CLI->>Config: loadOrcaConfig(configPath)
-    Config-->>CLI: { config, resolvedPath }
-    CLI->>Orch: runOrchestrator({ config, logLevel })
-    Orch->>Ref: Ref.make(initialSnapshot)
-    Orch->>Orch: log orca.boot.completed
+    CLI->>OC: loadOrcaConfig(configPath)
+    OC->>OC: dynamic import(orca.config.ts)
+    OC->>OC: Schema.decodeUnknownEffect(OrcaConfigSchema)
+    OC-->>CLI: { config, resolvedPath }
 
-    loop every intervalMs
+    CLI->>Orch: runOrchestrator({ config, configPath, logLevel })
+    Orch->>Orch: Ref.make(initialSnapshot)
+    Orch->>Orch: log("orca.boot.completed")
+
+    loop Every ~intervalMs
         Orch->>Linear: fetchActiveIssues(config.linear)
-        loop paginate
-            Linear->>Linear: fetchActiveIssuesPage(after)
-            Linear-->>Linear: page.nodes + pageInfo
+        Linear->>LA: POST /graphql (ActiveIssues, after: null)
+        LA-->>Linear: { data: { issues: { nodes, pageInfo } } }
+        alt hasNextPage
+            Linear->>LA: POST /graphql (after: endCursor)
+            LA-->>Linear: next page
         end
-        Linear-->>Orch: NormalizedIssue[]
+        Linear->>Linear: decodeActiveIssuesResponse(payload)
+        Linear->>Linear: normalizeActiveIssues(response, terminalStates)
+        Linear-->>Orch: Array<NormalizedIssue>
         Orch->>Orch: buildRuntimeSnapshot(issues)
-        Orch->>Ref: Ref.set(snapshot)
-        Orch->>Orch: log orca.snapshot.updated
-        alt error (non-interrupt)
-            Orch->>Orch: log orca.linear.poll.failed
-        else interrupt (SIGTERM)
-            Orch->>Main: Effect.failCause(interruptCause)
+        Orch->>Orch: Ref.set(snapshotRef, snapshot)
+        Orch->>Orch: log("orca.snapshot.updated")
+        alt poll error (typed or defect)
+            Orch->>Orch: catchCause → log("orca.linear.poll.failed")
         end
-        Orch->>Orch: Effect.sleep(intervalMs)
+        Orch->>Orch: Effect.sleep(remainingDelayMs)
     end
 ```
 
 <!-- greptile_other_comments_section -->
 
-<sub>Last reviewed commit: 6bbabe1</sub></body>
+<sub>Last reviewed commit: cf12b98</sub></body>
   </comment>
 </comments>
 

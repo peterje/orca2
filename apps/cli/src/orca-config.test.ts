@@ -105,7 +105,9 @@ describe("orca config", () => {
     if (!Schema.isSchemaError(failure)) {
       throw failure
     }
-    expect(String(failure.issue)).toContain("GITHUB_TOKEN")
+    expect(String(failure.issue)).toContain(
+      "GITHUB_TOKEN environment variable must be set",
+    )
   })
 
   it("loads a ts config file from disk", async () => {

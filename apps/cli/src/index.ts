@@ -3,6 +3,7 @@ import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { Command, Flag } from "effect/unstable/cli"
 import { formatErrorMessage } from "./error-format"
+import { writeLogLine } from "./logging"
 import { runOrchestrator } from "./orchestrator"
 import { appLogLevels } from "./logging"
 import { loadOrcaConfig } from "./orca-config"
@@ -38,7 +39,9 @@ export const cli = Command.make(
 export const program = Command.run(cli, { version: "0.0.0" }).pipe(
   Effect.catch((error: unknown) =>
     Effect.sync(() => {
-      console.error(formatErrorMessage(error))
+      writeLogLine("Error", "orca.boot.failed", {
+        message: formatErrorMessage(error),
+      })
       process.exitCode = 1
     }),
   ),

@@ -1,14 +1,16 @@
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "bun:test"
-import { log } from "./logging"
+import { log, writeLogLine } from "./logging"
 
 const originalConsoleLog = console.log
+const originalConsoleError = console.error
 
 let capturedLine: string | null = null
 
 afterEach(() => {
   capturedLine = null
   console.log = originalConsoleLog
+  console.error = originalConsoleError
 })
 
 describe("logging", () => {
@@ -34,5 +36,23 @@ describe("logging", () => {
     expect(parsed.level).toBe("Info")
     expect(parsed.timestamp).not.toBe("not-a-real-timestamp")
     expect(parsed.issueId).toBe("issue-1")
+  })
+
+  it("writes startup failures as structured error logs", () => {
+    console.error = (message?: unknown) => {
+      capturedLine = String(message)
+    }
+
+    writeLogLine("Error", "orca.boot.failed", {
+      message: "config decode failed",
+    })
+
+    expect(capturedLine).not.toBeNull()
+
+    const parsed = JSON.parse(capturedLine as string) as Record<string, unknown>
+
+    expect(parsed.event).toBe("orca.boot.failed")
+    expect(parsed.level).toBe("Error")
+    expect(parsed.message).toBe("config decode failed")
   })
 })

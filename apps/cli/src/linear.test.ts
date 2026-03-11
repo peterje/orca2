@@ -9,6 +9,10 @@ describe("linear normalization", () => {
       decodeActiveIssuesResponse({
         data: {
           issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "issue-1",
@@ -77,6 +81,10 @@ describe("linear normalization", () => {
       decodeActiveIssuesResponse({
         data: {
           issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "issue-9",
@@ -132,7 +140,7 @@ describe("linear normalization", () => {
         number: 100,
         url: "https://github.com/peterje/orca2/pull/100",
         title: "fix: auth token refresh",
-        attachmentId: "attachment-10",
+        attachmentId: "attachment-11",
       },
     ])
   })
@@ -143,6 +151,10 @@ describe("linear normalization", () => {
         decodeActiveIssuesResponse({
           data: {
             issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null,
+              },
               nodes: [
                 {
                   id: "issue-1",
@@ -166,6 +178,10 @@ describe("linear normalization", () => {
       decodeActiveIssuesResponse({
         data: {
           issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "issue-5",
@@ -205,6 +221,10 @@ describe("linear normalization", () => {
       decodeActiveIssuesResponse({
         data: {
           issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "issue-8",
@@ -244,6 +264,10 @@ describe("linear normalization", () => {
       decodeActiveIssuesResponse({
         data: {
           issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "issue-2",
@@ -340,6 +364,10 @@ describe("linear normalization", () => {
       decodeActiveIssuesResponse({
         data: {
           issues: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "issue-6",

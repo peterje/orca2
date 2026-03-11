@@ -45,6 +45,12 @@ const RawIssueSchema = Schema.Struct({
 
 type RawIssue = Schema.Schema.Type<typeof RawIssueSchema>
 type RawAttachment = RawIssue["attachments"]["nodes"][number]
+type ActiveIssuesPage = NonNullable<ActiveIssuesResponse["data"]>["issues"]
+
+const PageInfoSchema = Schema.Struct({
+  hasNextPage: Schema.Boolean,
+  endCursor: Schema.NullOr(Schema.String),
+})
 
 const LinearGraphqlErrorSchema = Schema.Struct({
   message: Schema.String,
@@ -55,6 +61,7 @@ export const ActiveIssuesResponseSchema = Schema.Struct({
     Schema.Struct({
       issues: Schema.Struct({
         nodes: Schema.Array(RawIssueSchema),
+        pageInfo: PageInfoSchema,
       }),
     }),
   ),
@@ -73,14 +80,19 @@ export const decodeActiveIssuesResponse = (input: unknown) =>
   Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)(input)
 
 const activeIssuesQuery = `
-  query ActiveIssues($projectSlug: String!, $activeStates: [String!]!) {
+  query ActiveIssues($projectSlug: String!, $activeStates: [String!]!, $after: String) {
     issues(
       first: 100
+      after: $after
       filter: {
         project: { slug: { eq: $projectSlug } }
         state: { name: { in: $activeStates } }
       }
     ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         id
         identifier
@@ -119,6 +131,26 @@ const activeIssuesQuery = `
 const pullRequestUrlPattern =
   /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i
 
+const toLinkedPullRequestRef = ({
+  attachment,
+  owner,
+  repo,
+  number,
+}: {
+  readonly attachment: RawAttachment
+  readonly owner: string
+  readonly repo: string
+  readonly number: number
+}): LinkedPullRequestRef => ({
+  provider: "github",
+  owner,
+  repo,
+  number,
+  url: attachment.url,
+  title: attachment.title,
+  attachmentId: attachment.id,
+})
+
 const normalizeLinkedPullRequests = (
   attachments: ReadonlyArray<RawAttachment>,
 ): Array<LinkedPullRequestRef> => {
@@ -141,24 +173,29 @@ const normalizeLinkedPullRequests = (
     const existing = deduped.get(key)
     if (existing) {
       if (existing.title === null && attachment.title !== null) {
-        deduped.set(key, {
-          ...existing,
-          title: attachment.title,
-        })
+        deduped.set(
+          key,
+          toLinkedPullRequestRef({
+            attachment,
+            owner,
+            repo,
+            number,
+          }),
+        )
       }
 
       continue
     }
 
-    deduped.set(key, {
-      provider: "github",
-      owner,
-      repo,
-      number,
-      url: attachment.url,
-      title: attachment.title,
-      attachmentId: attachment.id,
-    })
+    deduped.set(
+      key,
+      toLinkedPullRequestRef({
+        attachment,
+        owner,
+        repo,
+        number,
+      }),
+    )
   }
 
   return [...deduped.values()].sort((left, right) => left.number - right.number)
@@ -208,21 +245,20 @@ export const normalizeActiveIssues = (
   })
 }
 
-export interface LinearConfig {
-  readonly apiKey: string
-  readonly endpoint: string
-  readonly projectSlug: string
-  readonly activeStates: ReadonlyArray<string>
-  readonly terminalStates: ReadonlyArray<string>
-}
-
-export const fetchActiveIssues = (config: LinearConfig) =>
+const fetchActiveIssuesPage = ({
+  config,
+  after,
+}: {
+  readonly config: LinearConfig
+  readonly after: string | null
+}) =>
   Effect.gen(function* () {
     const body = yield* HttpBody.json({
       query: activeIssuesQuery,
       variables: {
         projectSlug: config.projectSlug,
         activeStates: [...config.activeStates],
+        after,
       },
     })
 
@@ -253,5 +289,55 @@ export const fetchActiveIssues = (config: LinearConfig) =>
       })
     }
 
-    return normalizeActiveIssues(payload, config.terminalStates)
+    return payload.data.issues
+  })
+
+export interface LinearConfig {
+  readonly apiKey: string
+  readonly endpoint: string
+  readonly projectSlug: string
+  readonly activeStates: ReadonlyArray<string>
+  readonly terminalStates: ReadonlyArray<string>
+}
+
+export const fetchActiveIssues = (config: LinearConfig) =>
+  Effect.gen(function* () {
+    const nodes: Array<RawIssue> = []
+    let after: string | null = null
+
+    while (true) {
+      const page: ActiveIssuesPage = yield* fetchActiveIssuesPage({
+        config,
+        after,
+      })
+      nodes.push(...page.nodes)
+
+      if (!page.pageInfo.hasNextPage) {
+        break
+      }
+
+      if (page.pageInfo.endCursor === null) {
+        return yield* new LinearApiError({
+          message:
+            "linear reported additional issue pages without an end cursor",
+        })
+      }
+
+      after = page.pageInfo.endCursor
+    }
+
+    return normalizeActiveIssues(
+      {
+        data: {
+          issues: {
+            nodes,
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+          },
+        },
+      },
+      config.terminalStates,
+    )
   })

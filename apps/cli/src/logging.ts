@@ -11,6 +11,8 @@ export const appLogLevels = [
 
 export type AppLogLevel = (typeof appLogLevels)[number]
 
+type LogFields = Record<string, unknown>
+
 const severityOrder: Readonly<Record<AppLogLevel, number>> = {
   Fatal: 0,
   Error: 1,
@@ -23,28 +25,43 @@ const severityOrder: Readonly<Record<AppLogLevel, number>> = {
 const shouldLog = (minimumLevel: AppLogLevel, messageLevel: AppLogLevel) =>
   severityOrder[messageLevel] <= severityOrder[minimumLevel]
 
+export const formatLogLine = (
+  messageLevel: AppLogLevel,
+  event: string,
+  fields: LogFields,
+) =>
+  JSON.stringify({
+    ...fields,
+    timestamp: new Date().toISOString(),
+    level: messageLevel,
+    event,
+  })
+
+export const writeLogLine = (
+  messageLevel: AppLogLevel,
+  event: string,
+  fields: LogFields,
+) => {
+  const line = formatLogLine(messageLevel, event, fields)
+
+  if (messageLevel === "Fatal" || messageLevel === "Error") {
+    console.error(line)
+    return
+  }
+
+  console.log(line)
+}
+
 export const log = (
   minimumLevel: AppLogLevel,
   messageLevel: AppLogLevel,
   event: string,
-  fields: Record<string, unknown>,
+  fields: LogFields,
 ) =>
   Effect.sync(() => {
     if (!shouldLog(minimumLevel, messageLevel)) {
       return
     }
 
-    const line = JSON.stringify({
-      ...fields,
-      timestamp: new Date().toISOString(),
-      level: messageLevel,
-      event,
-    })
-
-    if (messageLevel === "Fatal" || messageLevel === "Error") {
-      console.error(line)
-      return
-    }
-
-    console.log(line)
+    writeLogLine(messageLevel, event, fields)
   })

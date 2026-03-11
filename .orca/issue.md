@@ -26,264 +26,26 @@ Build the first end-to-end Orca tracer bullet: start from `orca.config.ts`, vali
 
 Confidence: 4/5
 
-## Unresolved review threads
-
-<comment author="greptile-apps" path="apps/cli/src/linear.ts">
-  <diffHunk><![CDATA[
-@@ -0,0 +1,249 @@
-+import { Data, Effect, Schema } from "effect"
-+import {
-+  HttpBody,
-+  HttpClient,
-+  HttpClientRequest,
-+  HttpClientResponse,
-+} from "effect/unstable/http"
-+import type { LinkedPullRequestRef, NormalizedIssue } from "./domain"
-+
-+const LabelSchema = Schema.Struct({
-+  id: Schema.String,
-+  name: Schema.String,
-+})
-+
-+const AttachmentSchema = Schema.Struct({
-+  id: Schema.String,
-+  title: Schema.NullOr(Schema.String),
-+  subtitle: Schema.NullOr(Schema.String),
-+  url: Schema.String,
-+  metadata: Schema.Unknown,
-+  sourceType: Schema.NullOr(Schema.String),
-+})
-+
-+const RawIssueSchema = Schema.Struct({
-+  id: Schema.String,
-+  identifier: Schema.String,
-+  title: Schema.String,
-+  description: Schema.NullOr(Schema.String),
-+  branchName: Schema.NullOr(Schema.String),
-+  priority: Schema.Number,
-+  createdAt: Schema.String,
-+  updatedAt: Schema.String,
-+  state: Schema.Struct({
-+    id: Schema.String,
-+    name: Schema.String,
-+    type: Schema.NullOr(Schema.String),
-+  }),
-+  labels: Schema.Struct({
-+    nodes: Schema.Array(LabelSchema),
-+  }),
-+  attachments: Schema.Struct({
-+    nodes: Schema.Array(AttachmentSchema),
-+  }),
-+})
-+
-+type RawIssue = Schema.Schema.Type<typeof RawIssueSchema>
-+type RawAttachment = RawIssue["attachments"]["nodes"][number]
-+
-+const LinearGraphqlErrorSchema = Schema.Struct({
-+  message: Schema.String,
-+})
-+
-+export const ActiveIssuesResponseSchema = Schema.Struct({
-+  data: Schema.NullOr(
-+    Schema.Struct({
-+      issues: Schema.Struct({
-+        nodes: Schema.Array(RawIssueSchema),
-+      }),
-+    }),
-+  ),
-+  errors: Schema.optional(Schema.Array(LinearGraphqlErrorSchema)),
-+})
-+
-+export type ActiveIssuesResponse = Schema.Schema.Type<
-+  typeof ActiveIssuesResponseSchema
-+>
-+
-+export class LinearApiError extends Data.TaggedError("LinearApiError")<{
-+  readonly message: string
-+}> {}
-+
-+export const decodeActiveIssuesResponse = (input: unknown) =>
-+  Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)(input)
-+
-+const activeIssuesQuery = `
-+  query ActiveIssues($projectSlug: String!, $activeStates: [String!]!) {
-+    issues(
-+      first: 100
-+      filter: {
-+        project: { slug: { eq: $projectSlug } }
-+        state: { name: { in: $activeStates } }
-+      }
-+    ) {
-+      nodes {
-+        id
-+        identifier
-+        title
-+        description
-+        branchName
-+        priority
-+        createdAt
-+        updatedAt
-+        state {
-+          id
-+          name
-+          type
-+        }
-+        labels {
-+          nodes {
-+            id
-+            name
-+          }
-+        }
-+        attachments {
-+          nodes {
-+            id
-+            title
-+            subtitle
-+            url
-+            metadata
-+            sourceType
-+          }
-+        }
-+      }
-+    }
-+  }
-+`
-+
-+const pullRequestUrlPattern =
-+  /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i
-+
-+const normalizeLinkedPullRequests = (
-+  attachments: ReadonlyArray<RawAttachment>,
-+): Array<LinkedPullRequestRef> => {
-+  const deduped = new Map<string, LinkedPullRequestRef>()
-+
-+  for (const attachment of attachments) {
-+    const match = attachment.url.match(pullRequestUrlPattern)
-+    if (!match) {
-+      continue
-+    }
-+
-+    const [, owner, repo, numberText] = match
-+    if (!owner || !repo || !numberText) {
-+      continue
-+    }
-+
-+    const number = Number(numberText)
-+    const key = `${owner}/${repo}#${number}`
-+
-+    if (deduped.has(key)) {
-+      continue
-+    }
-+
-+    deduped.set(key, {
-+      provider: "github",
-+      owner,
-+      repo,
-+      number,
-+      url: attachment.url,
-+      title: attachment.title,
-+      attachmentId: attachment.id,
-+    })
-+  }
-  ]]></diffHunk>
-  <lineNumber>154</lineNumber>
-  <body>**First-seen attachment wins, even when its title is `null`**
-
-`deduped.has(key)` causes the loop to skip every subsequent attachment for the same PR. If the first attachment has `title: null` but a later attachment for the same PR has a descriptive title (e.g. `"fix: auth token refresh"`), the null title silently wins and the result's `title` field is `null`.
-
-Since `attachment.title` is `NullOr(Schema.String)`, it's worth preferring a non-null title over a null one when deduplicating:
-
-```ts
-if (deduped.has(key)) {
-  // Prefer a non-null title if the already-stored entry has null
-  const existing = deduped.get(key)!
-  if (existing.title === null && attachment.title !== null) {
-    deduped.set(key, { ...existing, title: attachment.title })
-  }
-  continue
-}
-```
-
-In practice, Linear typically sets the same title on both attachments for the same PR, so this is low-risk — but the silent data-loss path is worth closing.</body>
-</comment>
-<comment author="greptile-apps" path="orca.config.ts">
-  <diffHunk><![CDATA[
-@@ -0,0 +1,43 @@
-+export default {
-+  linear: {
-+    apiKey: process.env.LINEAR_API_KEY,
-+    endpoint: "https://api.linear.app/graphql",
-+    projectSlug: "orca",
-+    activeStates: ["Todo", "In Progress"],
-+    terminalStates: ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"],
-+  },
-+  github: {
-+    token: process.env.GITHUB_TOKEN,
-+    apiUrl: "https://api.github.com",
-+    owner: "peterje",
-+    repo: "orca2",
-+    baseBranch: "main",
-+  },
-+  polling: {
-+    intervalMs: 5_000,
-+  },
-+  worktree: {
-+    repoRoot: ".",
-+    root: ".orca/worktrees",
-+  },
-+  agent: {
-+    maxTurns: 12,
-+    maxRetryBackoffMs: 300_000,
-+  },
-+  codex: {
-+    executable: "codex",
-+    args: ["app-server"],
-+    turnTimeoutMs: 3_600_000,
-+    readTimeoutMs: 5_000,
-+    stallTimeoutMs: 300_000,
-+  },
-+  greptile: {
-+    enabled: true,
-+    summonComment: "@greptileai",
-+    requiredScore: 5,
-  ]]></diffHunk>
-  <lineNumber>37</lineNumber>
-  <body>**`requiredScore: 5` will gate Orca's own PRs**
-
-The Greptile section is configured with `requiredScore: 5` (perfect confidence). Greptile's review of this very PR returned 4/5. If downstream Orca logic uses this threshold to block PR merges, Orca's own bootstrap PR would be blocked by itself.
-
-Consider whether `4` is a more practical minimum for initial operation, or whether the gate should be applied only to agent-authored PRs (not the bootstrap config PR itself).</body>
-</comment>
-
 ## General comments
 
 <comments>
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR implements the first end-to-end Orca tracer bullet: config validation via Effect Schema, a Linear polling loop, PR attachment normalization, and an in-memory runtime snapshot — wiring together the CLI entry point, orchestrator, and structured logger.
+This PR implements the first end-to-end Orca tracer bullet: Effect Schema-validated config loading, a Linear GraphQL polling loop, PR attachment normalization, and an in-memory `RuntimeSnapshot` managed by a resilient orchestrator. All defects flagged in the previous review round have been resolved — typed schema decoding (`decodeUnknownEffect`), defect-safe polling (`Effect.catchCause`), correct `Ref` usage, `NaN`-safe date comparisons, proper spread ordering in the logger, non-nullable `attachmentId`, the `"terminal"` state literal, and the `"cancelled"` type check.
 
-All previously flagged review issues have been resolved:
-- `Schema.decodeUnknownEffect` (non-sync) is now used in both `orca-config.ts` and `linear.ts`, keeping schema errors in the typed failure channel
-- `Effect.catchCause` in the poll loop catches both typed failures and defects, making the daemon resilient
-- `NormalizedStateSchema` includes the `"terminal"` literal; `normalizeActiveIssues` correctly assigns it
-- `state.type === "cancelled"` is checked alongside `"completed"` in the terminal guard
-- `attachmentId` is `Schema.String` (non-nullable), matching the runtime guarantee
-- `Ref.make` replaces the unnecessary `SubscriptionRef`; the `snapshotRef` is a clear placeholder for a future status endpoint
-- `...fields` spread precedes reserved keys in `log`, so `timestamp`/`level`/`event` always win on collision
-- `Number.isFinite` guard prevents silent NaN comparisons in the sort tiebreaker
-- `requiredEnvVar` provides descriptive per-field error messages via `.annotate({ message })`
-- `blockers: []` is annotated with a `TODO` comment
+Three new observations from this pass:
 
-Two minor new observations:
-- `normalizeLinkedPullRequests` uses first-seen deduplication, which silently prefers a `null` title over a descriptive one if the first attachment happens to have `title: null`
-- `greptile.requiredScore: 5` in `orca.config.ts` sets a perfect-score gate that would block Orca's own PRs (including this one at 4/5)
+- **`attachmentId` / `title` mismatch after deduplication upgrade** (`apps/cli/src/linear.ts:141`): when the title is promoted from a later non-null attachment, `attachmentId` is left pointing at the first (null-title) attachment, so the two fields in `LinkedPullRequestRef` reference different Linear attachment records.
+- **No pagination on the GraphQL query** (`apps/cli/src/linear.ts:75`): `first: 100` silently truncates results with no `hasNextPage` guard; low risk for a small project but worth noting.
+- **Startup errors bypass the structured logger** (`apps/cli/src/index.ts:39`): config load failures and top-level schema errors are written as plain text via `console.error`, inconsistent with the NDJSON format used by all runtime log calls.
+- **Stale `"grepline"` name in root `package.json`** (`package.json:2`): binary was renamed to `orca` but the workspace root name and `dev` script filter still reference `@grepline/cli`.
 
 <h3>Confidence Score: 4/5</h3>
 
-- Safe to merge — all previously flagged defects are resolved; remaining items are minor style/config concerns with no runtime impact.
-- All critical issues from the prior review round (sync schema decode, defect-bypassing poll loop, missing cancelled terminal check, nullable attachmentId, incorrect spread order) are cleanly addressed. The two new observations are low-severity: the null-title deduplication edge case is unlikely to trigger given Linear's typical behavior, and the requiredScore config value is a policy question rather than a correctness bug. Test coverage is thorough across normalization, config decode, sorting, and error formatting.
-- apps/cli/src/linear.ts (deduplication null-title edge case), orca.config.ts (requiredScore: 5 self-gate concern)
+- Safe to merge — all previously flagged defects are resolved; remaining items are minor logic and style concerns with no critical runtime impact.
+- All critical issues from the prior review (sync schema decode producing defects, unresisted poll-loop termination, missing `"cancelled"` terminal check, nullable `attachmentId`, incorrect log spread order) are cleanly addressed with matching test coverage. The new `attachmentId`/`title` mismatch after deduplication is a real inconsistency but not a runtime failure under current usage. Pagination truncation and log format inconsistency are low-severity style concerns. One point deducted for the `attachmentId` mismatch which could surprise downstream consumers.
+- `apps/cli/src/linear.ts` (attachmentId mismatch, pagination cap) and `package.json` (stale grepline name) warrant a second look.
 
 <h3>Important Files Changed</h3>
 
@@ -292,13 +54,14 @@ Two minor new observations:
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/linear.ts | Core linear integration: schema decoding, PR normalization, and API fetch. Previous issues (sync decode, missing cancelled state, normalizedState semantics) all resolved; minor first-wins deduplication can silently prefer a null title over a descriptive one. |
-| apps/cli/src/orchestrator.ts | Polling orchestrator with resilient catchCause, correct Ref usage, and NaN-safe date comparator. All previously flagged issues (SubscriptionRef, NaN sort, defect bypass) addressed. |
-| apps/cli/src/orca-config.ts | Config loading with Schema.decodeUnknownEffect and requiredEnvVar annotations. Sync decode issue resolved; annotation message format (string vs function) was previously flagged. |
-| apps/cli/src/domain.ts | Domain schemas for NormalizedIssue, LinkedPullRequestRef, RuntimeSnapshot. attachmentId correctly typed as non-nullable; terminal state literal added to NormalizedStateSchema. |
-| apps/cli/src/logging.ts | Structured JSON logger with severity filtering. Reserved keys (timestamp, level, event) correctly placed after ...fields spread so they always win on collision. |
-| apps/cli/src/index.ts | CLI entry point wiring config loading, orchestrator, and top-level error handling. Clean Effect pipeline with proper layer provision. |
-| orca.config.ts | Development config template reading env vars. greptile.requiredScore: 5 is strict — Greptile's current confidence of 4/5 on this PR would technically fail Orca's own gate. |
+| apps/cli/src/linear.ts | Core Linear integration: schema decoding, PR normalization, and GraphQL fetch. `decodeUnknownEffect` correctly used; terminal/cancelled states handled; deduplication upgraded to prefer non-null titles — but `attachmentId` is not updated alongside `title` during the upgrade, creating a mismatch. Query is also silently capped at 100 results with no pagination guard. |
+| apps/cli/src/orchestrator.ts | Polling orchestrator with `Effect.catchCause` for defect resilience, `Ref` (not `SubscriptionRef`), `Number.isFinite` guard on date comparator, and clean infinite loop. All previously flagged issues resolved. |
+| apps/cli/src/orca-config.ts | Config loading with `Schema.decodeUnknownEffect` and `requiredEnvVar` helpers for descriptive env-var error messages. The `message` annotation is passed as a plain string rather than a `(issue: ParseIssue) => string` function (previously flagged); whether this works at runtime depends on the Effect Schema v4 internals. |
+| apps/cli/src/index.ts | CLI entry point wiring config loading, orchestrator, and top-level error handling. Startup errors are emitted as plain `console.error` text while all runtime errors use the structured JSON logger, creating a mixed-format log stream. |
+| apps/cli/src/domain.ts | Domain schemas for `NormalizedIssue`, `LinkedPullRequestRef`, and `RuntimeSnapshot`. All three `NormalizedState` literals present; `attachmentId` correctly typed as non-nullable `Schema.String`; `blockers` stub documented with TODO. |
+| apps/cli/src/logging.ts | Structured JSON logger with severity filtering. Reserved keys (`timestamp`, `level`, `event`) are correctly placed after `...fields` spread so they always win on collision. |
+| package.json | Workspace root still named `"grepline"` with a `dev` filter referencing `@grepline/cli`, while the CLI binary was renamed to `orca` — a partial rename that leaves inconsistent identifiers across the monorepo root. |
+| orca.config.ts | Development config template reading env vars for Linear and GitHub. `requiredScore` updated from `5` to `4`, resolving the self-gate concern from the previous review round. |
 
 </details>
 
@@ -323,11 +86,11 @@ sequenceDiagram
 
     CLI->>Orch: runOrchestrator({config, logLevel})
     Orch->>Ref: Ref.make(emptySnapshot)
-    Orch->>CLI: log orca.boot.completed
+    Orch-->>CLI: log orca.boot.completed
 
     loop every intervalMs
         Orch->>Linear: fetchActiveIssues(config.linear)
-        Linear->>Linear: HttpClient POST /graphql
+        Linear->>Linear: HttpClient POST /graphql (first:100)
         Linear->>Linear: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
         Linear->>Norm: normalizeActiveIssues(payload, terminalStates)
         Norm->>Norm: normalizeLinkedPullRequests(attachments)
@@ -337,15 +100,15 @@ sequenceDiagram
         Snap->>Snap: selectRunnableIssue(issues)
         Snap-->>Orch: RuntimeSnapshot
         Orch->>Ref: Ref.set(snapshotRef, snapshot)
-        Orch->>CLI: log orca.snapshot.updated
+        Orch-->>CLI: log orca.snapshot.updated
         Orch->>Orch: Effect.sleep(intervalMs)
-        note over Orch: Effect.catchCause handles all errors
+        note over Orch: Effect.catchCause handles all typed failures and defects
     end
 ```
 
 <!-- greptile_other_comments_section -->
 
-<sub>Last reviewed commit: 99e2e51</sub></body>
+<sub>Last reviewed commit: 0bd64c9</sub></body>
   </comment>
 </comments>
 

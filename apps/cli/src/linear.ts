@@ -170,7 +170,8 @@ export const normalizeActiveIssues = (
     )
     const terminal =
       terminalStates.includes(issue.state.name) ||
-      issue.state.type === "completed"
+      issue.state.type === "completed" ||
+      issue.state.type === "cancelled"
     const runnable = !terminal && linkedPullRequests.length === 0
     const normalizedState = terminal
       ? "terminal"

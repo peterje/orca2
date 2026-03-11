@@ -135,6 +135,45 @@ describe("linear normalization", () => {
     expect(issues[0]?.runnable).toBe(false)
   })
 
+  it("treats cancelled state types as terminal even when not configured by name", async () => {
+    const decoded = await Effect.runPromise(
+      decodeActiveIssuesResponse({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "issue-8",
+                identifier: "PET-52",
+                title: "cancelled elsewhere",
+                description: null,
+                branchName: null,
+                priority: 2,
+                createdAt: "2026-03-11T08:10:00.000Z",
+                updatedAt: "2026-03-11T08:15:00.000Z",
+                state: {
+                  id: "state-7",
+                  name: "Won't Do",
+                  type: "cancelled",
+                },
+                labels: {
+                  nodes: [],
+                },
+                attachments: {
+                  nodes: [],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const issues = normalizeActiveIssues(decoded, ["Done"])
+
+    expect(issues[0]?.normalizedState).toBe("terminal")
+    expect(issues[0]?.runnable).toBe(false)
+  })
+
   it("selects a single runnable issue by priority, age, and identifier", async () => {
     const decoded = await Effect.runPromise(
       decodeActiveIssuesResponse({

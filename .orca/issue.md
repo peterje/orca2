@@ -24,73 +24,202 @@ Build the first end-to-end Orca tracer bullet: start from `orca.config.ts`, vali
 
 # Greptile review
 
-Confidence: 3/5
+Confidence: 4/5
 
 ## Unresolved review threads
 
-<comment author="greptile-apps" path="apps/cli/src/domain.ts">
+<comment author="greptile-apps" path="apps/cli/src/linear.ts">
   <diffHunk><![CDATA[
-@@ -0,0 +1,71 @@
-+import { Schema } from "effect"
-+
-+const NormalizedStateSchema = Schema.Union([
-+  Schema.Literal("runnable"),
-+  Schema.Literal("linked-pr-detected"),
-+  Schema.Literal("terminal"),
-+])
-+
-+export const LinkedPullRequestRefSchema = Schema.Struct({
-+  provider: Schema.Literal("github"),
-+  owner: Schema.String,
-+  repo: Schema.String,
-+  number: Schema.Number,
-+  url: Schema.String,
-+  title: Schema.NullOr(Schema.String),
-+  attachmentId: Schema.NullOr(Schema.String),
-  ]]></diffHunk>
-  <lineNumber>16</lineNumber>
-  <body>**`attachmentId` is typed as nullable but is never `null` at runtime**
-
-`Schema.NullOr(Schema.String)` allows `null` for `attachmentId`, but `normalizeLinkedPullRequests` in `linear.ts` always sets it to `attachment.id` — a `Schema.String` that is guaranteed non-null by the `AttachmentSchema`. The nullable type forces every downstream consumer to handle a `null` branch that can never actually occur, adding noise to call sites.
-
-Since there is no current code path that produces a `null` `attachmentId`, tightening the schema would improve clarity:
-
-```suggestion
-  attachmentId: Schema.String,
-```
-</body>
-</comment>
-<comment author="greptile-apps" path="apps/cli/src/orca-config.ts">
-  <diffHunk><![CDATA[
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,248 @@
 +import { Data, Effect, Schema } from "effect"
-+import { pathToFileURL } from "node:url"
-+import path from "node:path"
++import {
++  HttpBody,
++  HttpClient,
++  HttpClientRequest,
++  HttpClientResponse,
++} from "effect/unstable/http"
++import type { LinkedPullRequestRef, NormalizedIssue } from "./domain"
 +
-+export class ConfigLoadError extends Data.TaggedError("ConfigLoadError")<{
-+  readonly path: string
-+  readonly cause: unknown
++const LabelSchema = Schema.Struct({
++  id: Schema.String,
++  name: Schema.String,
++})
++
++const AttachmentSchema = Schema.Struct({
++  id: Schema.String,
++  title: Schema.NullOr(Schema.String),
++  subtitle: Schema.NullOr(Schema.String),
++  url: Schema.String,
++  metadata: Schema.Unknown,
++  sourceType: Schema.NullOr(Schema.String),
++})
++
++const RawIssueSchema = Schema.Struct({
++  id: Schema.String,
++  identifier: Schema.String,
++  title: Schema.String,
++  description: Schema.NullOr(Schema.String),
++  branchName: Schema.NullOr(Schema.String),
++  priority: Schema.Number,
++  createdAt: Schema.String,
++  updatedAt: Schema.String,
++  state: Schema.Struct({
++    id: Schema.String,
++    name: Schema.String,
++    type: Schema.NullOr(Schema.String),
++  }),
++  labels: Schema.Struct({
++    nodes: Schema.Array(LabelSchema),
++  }),
++  attachments: Schema.Struct({
++    nodes: Schema.Array(AttachmentSchema),
++  }),
++})
++
++type RawIssue = Schema.Schema.Type<typeof RawIssueSchema>
++type RawAttachment = RawIssue["attachments"]["nodes"][number]
++
++const LinearGraphqlErrorSchema = Schema.Struct({
++  message: Schema.String,
++})
++
++export const ActiveIssuesResponseSchema = Schema.Struct({
++  data: Schema.NullOr(
++    Schema.Struct({
++      issues: Schema.Struct({
++        nodes: Schema.Array(RawIssueSchema),
++      }),
++    }),
++  ),
++  errors: Schema.optional(Schema.Array(LinearGraphqlErrorSchema)),
++})
++
++export type ActiveIssuesResponse = Schema.Schema.Type<
++  typeof ActiveIssuesResponseSchema
++>
++
++export class LinearApiError extends Data.TaggedError("LinearApiError")<{
++  readonly message: string
 +}> {}
 +
-+const requiredEnvVar = (name: string) =>
-+  Schema.String.annotate({
-+    message: `${name} environment variable must be set`,
-+  })
++export const decodeActiveIssuesResponse = (input: unknown) =>
++  Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)(input)
++
++const activeIssuesQuery = `
++  query ActiveIssues($projectSlug: String!, $activeStates: [String!]!) {
++    issues(
++      first: 100
++      filter: {
++        project: { slug: { eq: $projectSlug } }
++        state: { name: { in: $activeStates } }
++      }
++    ) {
++      nodes {
++        id
++        identifier
++        title
++        description
++        branchName
++        priority
++        createdAt
++        updatedAt
++        state {
++          id
++          name
++          type
++        }
++        labels {
++          nodes {
++            id
++            name
++          }
++        }
++        attachments {
++          nodes {
++            id
++            title
++            subtitle
++            url
++            metadata
++            sourceType
++          }
++        }
++      }
++    }
++  }
++`
++
++const pullRequestUrlPattern =
++  /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i
++
++const normalizeLinkedPullRequests = (
++  attachments: ReadonlyArray<RawAttachment>,
++): Array<LinkedPullRequestRef> => {
++  const deduped = new Map<string, LinkedPullRequestRef>()
++
++  for (const attachment of attachments) {
++    const match = attachment.url.match(pullRequestUrlPattern)
++    if (!match) {
++      continue
++    }
++
++    const [, owner, repo, numberText] = match
++    if (!owner || !repo || !numberText) {
++      continue
++    }
++
++    const number = Number(numberText)
++    const key = `${owner}/${repo}#${number}`
++
++    if (deduped.has(key)) {
++      continue
++    }
++
++    deduped.set(key, {
++      provider: "github",
++      owner,
++      repo,
++      number,
++      url: attachment.url,
++      title: attachment.title,
++      attachmentId: attachment.id,
++    })
++  }
++
++  return [...deduped.values()].sort((left, right) => left.number - right.number)
++}
++
++const toPriorityRank = (priority: number) => (priority > 0 ? priority : 5)
++
++export const normalizeActiveIssues = (
++  response: ActiveIssuesResponse,
++  terminalStates: ReadonlyArray<string>,
++): Array<NormalizedIssue> => {
++  const nodes = response.data?.issues.nodes ?? []
++
++  return nodes.map((issue) => {
++    const linkedPullRequests = normalizeLinkedPullRequests(
++      issue.attachments.nodes,
++    )
++    const terminal =
++      terminalStates.includes(issue.state.name) ||
++      issue.state.type === "completed"
   ]]></diffHunk>
-  <lineNumber>13</lineNumber>
-  <body>**`message` annotation should be a function, not a plain string**
+  <lineNumber>173</lineNumber>
+  <body>**`state.type === "cancelled"` missing from terminal check**
 
-In Effect Schema v4, the `message` annotation on `Annotations.Schema` is typed as `(issue: ParseIssue) => string` — a function, not a bare string literal. Passing a string directly compiles because `.annotate()` accepts a loosely-typed annotations record, but at runtime Effect Schema calls the annotation value as a function. If it is a string, the call throws `TypeError: annotation is not a function`, meaning the custom message is never rendered and the test at `orca-config.test.ts:88` that asserts the error contains `"LINEAR_API_KEY"` would fail.
+The terminal guard checks `state.type === "completed"` but not `state.type === "cancelled"`. In Linear's schema, both `"completed"` and `"cancelled"` are terminal state types — they differ in meaning ("done" vs "cancelled"), but neither should be treated as a workable issue.
 
-The fix is to wrap the message in a thunk:
+If a workspace has a state whose `type` is `"cancelled"` but whose `name` is not listed in `config.terminalStates`, that issue would pass through as `runnable: true` (no linked PR) and potentially be selected by the orchestrator.
+
+In the default config, `terminalStates` already includes `"Cancelled"` / `"Canceled"`, so this is low-risk for the out-of-the-box setup. But the type-based check is meant to be a defensive backstop and should cover both Linear terminal types:
 
 ```suggestion
-const requiredEnvVar = (name: string) =>
-  Schema.String.annotate({
-    message: () => `${name} environment variable must be set`,
-  })
-```
-</body>
+    const terminal =
+      terminalStates.includes(issue.state.name) ||
+      issue.state.type === "completed" ||
+      issue.state.type === "cancelled"
+```</body>
 </comment>
 
 ## General comments
@@ -99,18 +228,20 @@ const requiredEnvVar = (name: string) =>
   <comment author="greptile-apps">
     <body><h3>Greptile Summary</h3>
 
-This PR implements the first end-to-end Orca tracer bullet: `orca.config.ts` schema validation via `Schema.decodeUnknownEffect`, a Linear GraphQL polling loop that normalizes active issues into `runnable` / `linked-pr-detected` / `terminal` states, GitHub PR URL extraction and deduplication from Linear attachments, and an in-memory `RuntimeSnapshot` maintained by the orchestrator. All critical issues from the previous review round have been addressed.
+This PR implements the end-to-end Orca tracer bullet: config loading and validation with Effect Schema, a Linear GraphQL polling loop, PR-attachment normalization, and an in-memory orchestrator snapshot — covering acceptance criteria from PET-46.
 
-**Key observations:**
-- `requiredEnvVar` in `orca-config.ts` annotates missing env var fields with `message: "..."` (a plain string) rather than `message: () => "..."` (the function form expected by Effect Schema). If Effect Schema calls the annotation as a function at runtime, this would throw a `TypeError` and silently suppress the named-variable message — and the `orca-config.test.ts` assertion that the error contains `"LINEAR_API_KEY"` would fail.
-- `attachmentId` in `LinkedPullRequestRefSchema` is typed `NullOr(Schema.String)` but is always assigned a non-null `attachment.id` in `normalizeLinkedPullRequests`, unnecessarily widening the type for all downstream consumers.
-- The PR description's verification steps list `bun run check` and `bun run build` but omit `bun test`, which is required by `AGENTS.md` ("test and typecheck before committing"). The three new test files cover critical normalization paths; confirming they pass before merge is recommended.
+Key changes and observations:
+- **Config loading** (`orca-config.ts`): Uses `Schema.decodeUnknownEffect` for typed failure propagation; `requiredEnvVar` helper annotates missing env var fields with human-readable messages.
+- **Linear normalization** (`linear.ts`): GraphQL query, attachment-based PR deduplication, `toPriorityRank` priority mapping, and `normalizeActiveIssues` are all sound. One issue: the terminal-state type guard checks `state.type === "completed"` but omits `state.type === "cancelled"` — see inline comment.
+- **Orchestrator** (`orchestrator.ts`): Polling loop uses `Effect.catchCause` (catches both typed failures and defects), `Ref.make` for snapshot state, and a NaN-safe date comparator — addressing the key concerns from the previous review.
+- **Domain** (`domain.ts`): `NormalizedStateSchema` correctly includes `"terminal"`, `attachmentId` is non-nullable, and `blockers` is stubbed with a `TODO` comment for future dependency discovery.
+- **Tests**: Good coverage across config decode, Linear payload normalization, terminal/runnable classification, priority+age sort, and the NaN-date fallback path.
 
-<h3>Confidence Score: 3/5</h3>
+<h3>Confidence Score: 4/5</h3>
 
-- Safe to merge after verifying `bun test` passes, particularly the `requiredEnvVar` message annotation behavior.
-- The core logic (schema decode, polling loop, issue normalization, error handling) is solid and all previous critical issues have been resolved. The score is held at 3 rather than 4 because `bun test` is absent from the stated verification steps — the `requiredEnvVar` plain-string annotation may cause the `orca-config.test.ts` assertion to fail at runtime, which would be a functional regression in the user-facing error message for missing env vars. Once tests are confirmed green this could be raised to 4.
-- Pay close attention to `apps/cli/src/orca-config.ts` (the `requiredEnvVar` message annotation) and `apps/cli/src/domain.ts` (`attachmentId` nullability).
+- Safe to merge with one minor fix recommended for the missing `state.type === "cancelled"` terminal guard.
+- The most significant issues from the prior review round (Effect.sync/defect leakage, SubscriptionRef overhead, NaN sort, nullable attachmentId, missing "terminal" state) have all been addressed. One new logic gap remains: the terminal-state type guard is incomplete, which could misclassify a cancelled issue as runnable in non-default workspace configurations. It is low risk for the default setup but should be fixed before the polling loop handles real issues.
+- `apps/cli/src/linear.ts` — the `normalizeActiveIssues` terminal check at line 172–173.
 
 <h3>Important Files Changed</h3>
 
@@ -119,13 +250,14 @@ This PR implements the first end-to-end Orca tracer bullet: `orca.config.ts` sch
 
 | Filename | Overview |
 |----------|----------|
-| apps/cli/src/orchestrator.ts | Polling loop correctly uses `Effect.catchCause` for resilience; switched from `SubscriptionRef` to plain `Ref` (addressing prior feedback); `snapshotRef` is still local and never returned, meaning the `Ref` writes are currently unobservable from outside the function — acceptable for tracer-bullet scope. |
-| apps/cli/src/linear.ts | Uses `Schema.decodeUnknownEffect` correctly; normalizes all three issue states (`runnable`, `linked-pr-detected`, `terminal`); deduplicates PR attachment URLs by owner/repo/number; `blockers: []` stub is annotated with a TODO. No new logic issues found. |
-| apps/cli/src/orca-config.ts | Config decode correctly uses `Schema.decodeUnknownEffect`; `requiredEnvVar` attempts to annotate missing-env-var fields with a named message but passes a plain string instead of a function `(issue: ParseIssue) => string`, which may cause a runtime `TypeError` when the annotation is invoked during error rendering. |
-| apps/cli/src/domain.ts | Clean domain schema definitions; all three `normalizedState` literals present; `attachmentId` on `LinkedPullRequestRefSchema` is typed `NullOr(String)` but is never assigned `null` in practice — minor type over-widening. |
-| apps/cli/src/index.ts | CLI entry point correctly wires config loading, orchestrator, and error formatting; `FetchHttpClient.layer` and `BunServices.layer` are properly provided; `Effect.catch` handles all typed failures from both load and orchestration paths. |
-| apps/cli/src/linear.test.ts | Good test coverage for normalization, deduplication, schema validation, terminal/runnable state classification, priority/age/identifier sort ordering, and the NaN-safe timestamp fallback path. |
-| apps/cli/src/orca-config.test.ts | Tests valid decode, invalid-config schema failure (asserting `"LINEAR_API_KEY"` in the error message), and disk-load round-trip; correctness of the `LINEAR_API_KEY` assertion depends on whether the `requiredEnvVar` message annotation renders as expected at runtime. |
+| apps/cli/src/linear.ts | Implements the Linear GraphQL query, payload decoding (now correctly using `Schema.decodeUnknownEffect`), and normalization logic. One new issue: the terminal-state guard only checks `state.type === "completed"` and misses `state.type === "cancelled"`, which could misclassify cancelled issues as runnable in edge-case workspace configurations. |
+| apps/cli/src/orchestrator.ts | Implements the polling loop and runtime snapshot management. Uses `Effect.catchCause` (catching both typed failures and defects), `Ref.make` for the snapshot, and a guarded NaN-safe date comparator — addressing the key issues raised in previous review threads. |
+| apps/cli/src/orca-config.ts | Config loading and schema validation using `Schema.decodeUnknownEffect`. The `requiredEnvVar` helper annotates the schema with a descriptive message for missing env vars. Previous issues with `Effect.sync`/`decodeUnknownSync` have been resolved. |
+| apps/cli/src/domain.ts | Defines the core domain schemas and types. `NormalizedStateSchema` correctly includes the `"terminal"` variant. `attachmentId` is now typed as `Schema.String` (non-nullable), tightening the type appropriately. `blockers` remains a stub with a TODO comment. |
+| apps/cli/src/index.ts | CLI entry point wiring config loading, orchestrator startup, and top-level error formatting. Straightforward and correct. |
+| apps/cli/src/error-format.ts | Simple error formatting utility covering schema errors, config load errors, and generic errors. Clean and well-tested. |
+| apps/cli/src/logging.ts | Structured JSON logger with severity filtering. Correctly routes errors/fatals to stderr and everything else to stdout. |
+| orca.config.ts | Repository-level Orca configuration using `process.env` for API keys. Fails fast with a schema error when env vars are missing. |
 
 </details>
 
@@ -135,50 +267,44 @@ This PR implements the first end-to-end Orca tracer bullet: `orca.config.ts` sch
 
 ```mermaid
 sequenceDiagram
-    participant CLI as index.ts (CLI entry)
+    participant CLI as index.ts (CLI)
     participant Config as orca-config.ts
     participant Orch as orchestrator.ts
     participant Linear as linear.ts
-    participant LinAPI as Linear GraphQL API
+    participant Ref as Ref<RuntimeSnapshot>
 
-    CLI->>Config: loadOrcaConfig(configPath)
-    Config->>Config: import(pathToFileURL(resolvedPath))
+    CLI->>Config: loadOrcaConfig(path)
+    Config->>Config: dynamic import(configPath)
     Config->>Config: Schema.decodeUnknownEffect(OrcaConfigSchema)
     Config-->>CLI: { config, resolvedPath }
 
     CLI->>Orch: runOrchestrator({ config, configPath, logLevel })
-    Orch->>Orch: Ref.make(initialSnapshot)
-    Orch->>Orch: log("orca.boot.completed")
+    Orch->>Ref: Ref.make(emptySnapshot)
+    Orch->>CLI: log orca.boot.completed
 
-    loop every config.polling.intervalMs ms
+    loop Every config.polling.intervalMs
         Orch->>Linear: fetchActiveIssues(config.linear)
-        Linear->>LinAPI: POST /graphql (ActiveIssues query)
-        LinAPI-->>Linear: JSON response
+        Linear->>Linear: HttpClient POST /graphql
+        Linear->>Linear: HttpClientResponse.filterStatusOk
         Linear->>Linear: Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)
-        Linear->>Linear: normalizeLinkedPullRequests(attachments)
         Linear->>Linear: normalizeActiveIssues(payload, terminalStates)
         Linear-->>Orch: NormalizedIssue[]
 
-        Orch->>Orch: buildRuntimeSnapshot(issues)
-        Note over Orch: selectRunnableIssue — sort by priorityRank,<br/>createdAt, then identifier
-        Orch->>Orch: Ref.set(snapshotRef, snapshot)
-        Orch->>Orch: log("orca.snapshot.updated")
-
-        alt fetch / decode / GraphQL error
-            Orch->>Orch: catchCause → log("orca.linear.poll.failed")
+        alt Success
+            Orch->>Orch: buildRuntimeSnapshot(issues)
+            Orch->>Ref: Ref.set(snapshotRef, snapshot)
+            Orch->>CLI: log orca.snapshot.updated
+        else Failure / Defect
+            Orch->>CLI: log orca.linear.poll.failed (via catchCause)
         end
 
         Orch->>Orch: Effect.sleep(intervalMs)
-    end
-
-    alt config load or schema error
-        CLI->>CLI: Effect.catch → formatErrorMessage → process.exitCode = 1
     end
 ```
 
 <!-- greptile_other_comments_section -->
 
-<sub>Last reviewed commit: 699c367</sub></body>
+<sub>Last reviewed commit: 3ed170f</sub></body>
   </comment>
 </comments>
 

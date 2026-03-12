@@ -945,6 +945,7 @@ export const deriveAiReviewStatus = ({
   previousStatus,
   reviewThreads,
   reviews,
+  summonComment,
 }: {
   readonly currentHeadSha: string
   readonly headCommitCommittedAt: string | null
@@ -952,8 +953,10 @@ export const deriveAiReviewStatus = ({
   readonly previousStatus?: AiReviewStatus | null | undefined
   readonly reviewThreads: ReadonlyArray<ReviewThreadSummary>
   readonly reviews: ReadonlyArray<ReviewSummary>
+  readonly summonComment?: string | null | undefined
 }): AiReviewStatus => {
   const sameHead = previousStatus?.headSha === currentHeadSha
+  const reviewSummon = summonComment?.trim() ?? ""
   const activityBaseline =
     sameHead && previousStatus?.waitingSince
       ? previousStatus.waitingSince
@@ -968,11 +971,14 @@ export const deriveAiReviewStatus = ({
     }
   }
 
-  const pendingIssueComments = issueComments.filter((comment) =>
-    timestampAfter(
-      comment.createdAt,
-      headCommitCommittedAt ?? activityBaseline,
-    ),
+  const pendingIssueComments = issueComments.filter(
+    (comment) =>
+      timestampAfter(
+        comment.createdAt,
+        headCommitCommittedAt ?? activityBaseline,
+      ) &&
+      reviewSummon.length > 0 &&
+      comment.body.includes(reviewSummon),
   )
 
   const reviewActivityTimestamps = [
@@ -1119,6 +1125,7 @@ export const inspectIssueGitHubState = ({
   issue,
   listPullRequestsByBranch:
     listPullRequestsByBranchImpl = listPullRequestsByBranch,
+  summonComment,
   trackedBranchName,
 }: {
   readonly currentAiReviewStatus?: AiReviewStatus | null | undefined
@@ -1153,6 +1160,7 @@ export const inspectIssueGitHubState = ({
     GitHubApiError,
     HttpClient.HttpClient
   >
+  readonly summonComment?: string | null | undefined
   readonly trackedBranchName?: string | null | undefined
 }): Effect.Effect<
   GitHubInspectionResult,
@@ -1195,6 +1203,7 @@ export const inspectIssueGitHubState = ({
           previousStatus: currentAiReviewStatus,
           reviewThreads: reviewContext.reviewThreads,
           reviews: reviewContext.reviews,
+          summonComment,
         })
 
         return {

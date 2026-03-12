@@ -104,6 +104,7 @@ describe("github inspection", () => {
           branchLookups.push(branchName)
           return Effect.succeed([])
         },
+        summonComment: "@review please",
       }) as Effect.Effect<GitHubInspectionResult, unknown, never>,
     )
 
@@ -146,6 +147,7 @@ describe("github inspection", () => {
             },
           ])
         },
+        summonComment: "@greptileai",
         trackedBranchName: "pet-47",
       }) as Effect.Effect<GitHubInspectionResult, unknown, never>,
     )
@@ -257,6 +259,7 @@ describe("github inspection", () => {
           },
         ],
         reviews: [],
+        summonComment: "@review please",
       }),
     ).toEqual({
       headSha: "abc123",
@@ -282,6 +285,7 @@ describe("github inspection", () => {
         ],
         reviewThreads: [],
         reviews: [],
+        summonComment: "@review please",
       }),
     ).toEqual({
       headSha: "abc123",
@@ -355,5 +359,31 @@ describe("github inspection", () => {
         },
       }),
     ).toBe("2026-03-11T12:00:00.000Z")
+  })
+
+  it("does not mark ai review pending for unrelated comments without the summon", () => {
+    expect(
+      deriveAiReviewStatus({
+        currentHeadSha: "abc123",
+        headCommitCommittedAt: "2026-03-11T12:00:00.000Z",
+        issueComments: [
+          {
+            authorLogin: "teammate",
+            body: "i will review this after lunch",
+            createdAt: "2026-03-11T12:01:00.000Z",
+            htmlUrl: "https://github.com/peterje/orca2/pull/42#issuecomment-2",
+            id: "comment-2",
+          },
+        ],
+        reviewThreads: [],
+        reviews: [],
+        summonComment: "@greptileai",
+      }),
+    ).toEqual({
+      headSha: "abc123",
+      lastObservedReviewActivityAt: null,
+      status: "not_requested",
+      waitingSince: null,
+    })
   })
 })

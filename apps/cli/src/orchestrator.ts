@@ -377,10 +377,12 @@ const reconcileIssuesWithGitHub = ({
   config,
   issues,
   issueStates,
+  summonComment,
 }: {
   readonly config: OrcaConfig["github"]
   readonly issues: ReadonlyArray<NormalizedIssue>
   readonly issueStates: IssueStateMap
+  readonly summonComment: string
 }) =>
   Effect.gen(function* () {
     let currentIssueStates = issueStates
@@ -401,6 +403,7 @@ const reconcileIssuesWithGitHub = ({
         currentHeadSha: currentIssueState?.currentHeadSha,
         currentReviewRoundCount: currentIssueState?.aiReviewRoundCount,
         issue,
+        summonComment,
         trackedBranchName: currentIssueState?.branchName,
       }).pipe(
         Effect.map((inspection) =>
@@ -923,6 +926,7 @@ export const runOrchestrator = ({
               (issue) => issue.normalizedState !== "terminal",
             ),
             issueStates: reconciledIssueStates,
+            summonComment: config.greptile.summonComment,
           })
 
           yield* Ref.set(activeIssuesRef, issues)

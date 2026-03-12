@@ -136,7 +136,7 @@ export const buildAiReviewEvaluationPrompt = ({
     formatReviewThreads(reviewContext),
     "",
     "Instructions",
-    "- read the PR diff, comments, reviews, and unresolved threads before deciding",
+    "- read the PR diff, comments, reviews, and review threads before deciding",
     "- use any AI review artifacts on the PR as evidence only, not as a required parsed contract",
     "- choose continue_ai_loop for correctness, reliability, security, or substantive maintainability issues",
     "- choose waiting_for_human_review when the remaining work is mostly nits, polish, cleanup, or low-risk follow-up",

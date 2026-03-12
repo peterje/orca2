@@ -188,11 +188,12 @@ const extractAssistantText = (response: PromptSessionResponse) => {
     return ""
   }
 
-  return parts
+  const textParts = parts
     .filter((part) => part.type === "text" && typeof part.text === "string")
     .map((part) => part.text?.trim() ?? "")
     .filter((part) => part.length > 0)
-    .join("\n")
+
+  return textParts.at(-1) ?? ""
 }
 
 const runOpencodePrompt = ({

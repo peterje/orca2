@@ -7,6 +7,8 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import {
   ensureIssueWorktree,
+  inspectIssueWorktree,
+  removeIssueWorktree,
   resolveIssueBranchName,
 } from "./git-worktree"
 
@@ -113,5 +115,93 @@ describe("git worktree", () => {
     expect(reused.reused).toBe(true)
     expect(reused.path).toBe(created.path)
     expect(branch.stdout.trim()).toBe("pet-47")
+  })
+
+  it("requires manual intervention for dirty existing worktrees", async () => {
+    const repoRoot = await createRepository()
+    const worktreeRoot = path.join(repoRoot, ".orca", "worktrees")
+    const worktree = await Effect.runPromise(
+      ensureIssueWorktree({
+        config: {
+          github: {
+            baseBranch: "main",
+          },
+          worktree: {
+            repoRoot,
+            root: worktreeRoot,
+          },
+        } as never,
+        issue,
+      }),
+    )
+
+    await writeFile(path.join(worktree.path, "README.md"), "dirty worktree\n")
+
+    const inspection = await Effect.runPromise(
+      inspectIssueWorktree({
+        config: {
+          github: {
+            baseBranch: "main",
+          },
+          worktree: {
+            repoRoot,
+            root: worktreeRoot,
+          },
+        } as never,
+        issue,
+      }),
+    )
+
+    expect(inspection).toEqual({
+      branchName: "pet-47",
+      kind: "manual-intervention",
+      message: `worktree ${worktree.path} has uncommitted changes and requires manual intervention`,
+      path: worktree.path,
+    })
+  })
+
+  it("removes terminal issue worktrees", async () => {
+    const repoRoot = await createRepository()
+    const worktreeRoot = path.join(repoRoot, ".orca", "worktrees")
+    const worktree = await Effect.runPromise(
+      ensureIssueWorktree({
+        config: {
+          github: {
+            baseBranch: "main",
+          },
+          worktree: {
+            repoRoot,
+            root: worktreeRoot,
+          },
+        } as never,
+        issue,
+      }),
+    )
+
+    const removed = await Effect.runPromise(
+      removeIssueWorktree({
+        config: {
+          github: {
+            baseBranch: "main",
+          },
+          worktree: {
+            repoRoot,
+            root: worktreeRoot,
+          },
+        } as never,
+        issue,
+      }),
+    )
+
+    const listing = await execFileAsync(
+      "git",
+      ["worktree", "list", "--porcelain"],
+      {
+        cwd: repoRoot,
+      },
+    )
+
+    expect(removed).toBe(worktree.path)
+    expect(listing.stdout.includes(worktree.path)).toBe(false)
   })
 })

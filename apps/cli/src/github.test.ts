@@ -431,6 +431,39 @@ describe("github inspection", () => {
     })
   })
 
+  it("invalidates null-commit approvals after a tracked head reset", () => {
+    expect(
+      deriveHumanReviewStatus({
+        config: humanReviewConfig,
+        currentHeadSha: "def456",
+        headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+        issueComments: [],
+        previousHeadSha: null,
+        reviewThreads: [],
+        reviews: [
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "teammate",
+            body: "looks good",
+            commitId: null,
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-1",
+            id: "review-1b",
+            state: "APPROVED",
+            submittedAt: "2026-03-11T12:06:00.000Z",
+          },
+        ],
+      }),
+    ).toEqual({
+      actionableFeedbackCount: 0,
+      approvalCount: 1,
+      hasActionableFeedback: false,
+      hasFreshApproval: false,
+      isGreen: false,
+      unresolvedThreadCount: 0,
+    })
+  })
+
   it("marks human review green only with a current-head approval and no actionable feedback", () => {
     expect(
       deriveHumanReviewStatus({

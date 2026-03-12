@@ -1281,9 +1281,7 @@ export const deriveHumanReviewStatus = ({
     (review) => review.state === "APPROVED" && review.commitId === null,
   )
   const headChanged =
-    previousHeadSha !== undefined &&
-    previousHeadSha !== null &&
-    previousHeadSha !== currentHeadSha
+    previousHeadSha !== undefined && previousHeadSha !== currentHeadSha
   const hasFreshApproval =
     freshHeadApprovalReviews.length > 0 ||
     (!headChanged && fallbackApprovalReviews.length > 0)

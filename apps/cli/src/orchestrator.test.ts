@@ -484,6 +484,51 @@ describe("orchestrator", () => {
     expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
   })
 
+  it("returns ready for merge to waiting for ci when the pr becomes a draft", () => {
+    const nextState = updateIssueStateForGitHubInspection({
+      issue,
+      issueStates: new Map([
+        [
+          issue.id,
+          issueState({
+            aiReviewRoundCount: 2,
+            branchName: "pet-47",
+            checkSummary: {
+              failedCount: 0,
+              pendingCount: 0,
+              status: "passed",
+              successfulCount: 3,
+              totalCount: 3,
+            },
+            currentHeadSha: "def456",
+            currentPullRequest: {
+              ...pullRequest,
+              headSha: "def456",
+            },
+            state: "ReadyForMerge",
+            worktreePath: "/repo/.orca/worktrees/pet-47",
+          }),
+        ],
+      ]),
+      inspection: foundPullRequestInspection({
+        aiReviewStatus: null,
+        headCommitCommittedAt: null,
+        headSha: "def456",
+        humanReviewStatus: null,
+        pullRequest: {
+          ...pullRequest,
+          headSha: "def456",
+          isDraft: true,
+        },
+        reviewContext: emptyReviewContext,
+        reviewRoundCount: null,
+      }),
+    })
+
+    expect(nextState.get(issue.id)?.state).toBe("WaitingForCi")
+    expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
+  })
+
   it("returns to waiting for pr when a branch-associated pr disappears", () => {
     const nextState = updateIssueStateForGitHubInspection({
       issue,

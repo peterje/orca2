@@ -1304,6 +1304,7 @@ export const deriveHumanReviewStatus = ({
     isActionableIssueComment,
   ).length
   const actionableThreadCommentCount = reviewThreads
+    .filter((thread) => !thread.isResolved)
     .flatMap((thread) => thread.comments)
     .filter(isActionableThreadComment).length
   const actionableReviewCount = latestHumanReviews.filter(

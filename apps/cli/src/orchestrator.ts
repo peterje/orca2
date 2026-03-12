@@ -324,20 +324,19 @@ export const updateIssueStateForGitHubInspection = ({
 
     const sameHeadAsTracked =
       currentIssueState?.currentHeadSha === inspection.headSha
-    const nextState: OrcaIssueState =
-      sameHeadAsTracked &&
-      currentIssueState !== undefined &&
-      humanReviewHoldingStates.has(currentIssueState.state)
+    const nextState: OrcaIssueState = inspection.pullRequest.isDraft
+      ? "WaitingForCi"
+      : sameHeadAsTracked &&
+          currentIssueState !== undefined &&
+          humanReviewHoldingStates.has(currentIssueState.state)
         ? inspection.humanReviewStatus?.hasActionableFeedback
           ? "AddressingHumanFeedback"
           : inspection.humanReviewStatus?.isGreen
             ? "ReadyForMerge"
             : "WaitingForHumanReview"
-        : inspection.pullRequest.isDraft
-          ? "WaitingForCi"
-          : inspection.aiReviewStatus?.status === "completed"
-            ? "EvaluatingAiReview"
-            : "WaitingForAiReview"
+        : inspection.aiReviewStatus?.status === "completed"
+          ? "EvaluatingAiReview"
+          : "WaitingForAiReview"
 
     return updateIssueState(issueStates, issue, {
       aiReviewRoundCount:

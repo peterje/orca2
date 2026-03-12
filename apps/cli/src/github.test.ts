@@ -536,4 +536,58 @@ describe("github inspection", () => {
       unresolvedThreadCount: 1,
     })
   })
+
+  it("ignores resolved thread comments when deciding if human feedback is still actionable", () => {
+    expect(
+      deriveHumanReviewStatus({
+        config: humanReviewConfig,
+        currentHeadSha: "def456",
+        headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+        issueComments: [],
+        previousHeadSha: "def456",
+        reviewThreads: [
+          {
+            comments: [
+              {
+                authorLogin: "teammate",
+                body: "address this edge case",
+                commitId: "def456",
+                createdAt: "2026-03-11T12:08:00.000Z",
+                htmlUrl:
+                  "https://github.com/peterje/orca2/pull/42#discussion_r6",
+                id: "thread-comment-6",
+                inReplyToId: null,
+                originalCommitId: "def456",
+                path: "src/index.ts",
+              },
+            ],
+            id: "thread-6",
+            isResolved: true,
+            path: "src/index.ts",
+            updatedAt: "2026-03-11T12:09:00.000Z",
+          },
+        ],
+        reviews: [
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "teammate",
+            body: "approved",
+            commitId: "def456",
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-6",
+            id: "review-6",
+            state: "APPROVED",
+            submittedAt: "2026-03-11T12:10:00.000Z",
+          },
+        ],
+      }),
+    ).toEqual({
+      actionableFeedbackCount: 0,
+      approvalCount: 1,
+      hasActionableFeedback: false,
+      hasFreshApproval: true,
+      isGreen: true,
+      unresolvedThreadCount: 0,
+    })
+  })
 })

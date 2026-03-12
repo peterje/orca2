@@ -2,7 +2,12 @@ import { Effect } from "effect"
 import { describe, expect, it } from "bun:test"
 import type { PullRequest } from "./domain"
 import type { GitHubInspectionResult } from "./github"
-import { inspectIssueGitHubState, normalizeCheckSummary } from "./github"
+import {
+  deriveAiReviewStatus,
+  inspectIssueGitHubState,
+  normalizeCheckSummary,
+  resolveHeadCommitCommittedAt,
+} from "./github"
 
 const baseIssue = {
   blockers: [],
@@ -50,6 +55,8 @@ describe("github inspection", () => {
     const result = await Effect.runPromise(
       inspectIssueGitHubState({
         config: githubConfig,
+        currentHeadSha: null,
+        currentReviewRoundCount: null,
         fetchCheckSummary: () =>
           Effect.succeed({
             failedCount: 0,
@@ -59,6 +66,24 @@ describe("github inspection", () => {
             totalCount: 2,
           }),
         fetchPullRequestByNumber: () => Effect.succeed(openPullRequest),
+        fetchReviewContext: () =>
+          Effect.succeed({
+            headCommitCommittedAt: "2026-03-11T12:02:00.000Z",
+            reviewContext: {
+              issueComments: [
+                {
+                  authorLogin: "orca-bot",
+                  body: "@review please",
+                  createdAt: "2026-03-11T12:03:00.000Z",
+                  htmlUrl:
+                    "https://github.com/peterje/orca2/pull/42#issuecomment-1",
+                  id: "comment-1",
+                },
+              ],
+              reviewThreads: [],
+              reviews: [],
+            },
+          }),
         issue: {
           ...baseIssue,
           branchName: "some-other-branch",
@@ -79,6 +104,7 @@ describe("github inspection", () => {
           branchLookups.push(branchName)
           return Effect.succeed([])
         },
+        summonComment: "@review please",
       }) as Effect.Effect<GitHubInspectionResult, unknown, never>,
     )
 
@@ -88,6 +114,7 @@ describe("github inspection", () => {
     }
     expect(result.associationSource).toBe("linear")
     expect(result.headSha).toBe("abc123")
+    expect(result.aiReviewStatus?.status).toBe("pending")
     expect(branchLookups).toEqual([])
   })
 
@@ -97,6 +124,8 @@ describe("github inspection", () => {
     const result = await Effect.runPromise(
       inspectIssueGitHubState({
         config: githubConfig,
+        currentHeadSha: null,
+        currentReviewRoundCount: null,
         fetchCheckSummary: () =>
           Effect.succeed({
             failedCount: 0,
@@ -118,11 +147,13 @@ describe("github inspection", () => {
             },
           ])
         },
+        summonComment: "@greptileai",
         trackedBranchName: "pet-47",
       }) as Effect.Effect<GitHubInspectionResult, unknown, never>,
     )
 
     expect(result).toEqual({
+      aiReviewStatus: null,
       associationSource: "branch",
       branchNames: ["pet-47"],
       checkSummary: {
@@ -141,6 +172,12 @@ describe("github inspection", () => {
         title: "feat: reconcile github state",
         url: "https://github.com/peterje/orca2/pull/43",
       },
+      reviewContext: {
+        issueComments: [],
+        reviewThreads: [],
+        reviews: [],
+      },
+      reviewRoundCount: null,
     })
     expect(branchLookups).toEqual(["pet-47"])
   })
@@ -176,6 +213,85 @@ describe("github inspection", () => {
       branchNames: ["pet-47"],
       kind: "ambiguous",
       message: "linked pull request peterje/orca2#42 is closed",
+    })
+  })
+
+  it("classifies ai review as completed when review activity arrives after waiting", () => {
+    expect(
+      deriveAiReviewStatus({
+        currentHeadSha: "abc123",
+        headCommitCommittedAt: "2026-03-11T12:00:00.000Z",
+        issueComments: [
+          {
+            authorLogin: "orca-bot",
+            body: "@review please",
+            createdAt: "2026-03-11T12:01:00.000Z",
+            htmlUrl: "https://github.com/peterje/orca2/pull/42#issuecomment-1",
+            id: "comment-1",
+          },
+        ],
+        previousStatus: {
+          headSha: "abc123",
+          lastObservedReviewActivityAt: null,
+          status: "pending",
+          waitingSince: "2026-03-11T12:01:00.000Z",
+        },
+        reviewThreads: [
+          {
+            comments: [
+              {
+                authorLogin: "review-bot",
+                body: "needs a test",
+                commitId: "abc123",
+                createdAt: "2026-03-11T12:04:00.000Z",
+                htmlUrl:
+                  "https://github.com/peterje/orca2/pull/42#discussion_r1",
+                id: "thread-comment-1",
+                inReplyToId: null,
+                originalCommitId: "abc123",
+                path: "src/index.ts",
+              },
+            ],
+            id: "thread-1",
+            isResolved: false,
+            path: "src/index.ts",
+            updatedAt: "2026-03-11T12:04:00.000Z",
+          },
+        ],
+        reviews: [],
+        summonComment: "@review please",
+      }),
+    ).toEqual({
+      headSha: "abc123",
+      lastObservedReviewActivityAt: "2026-03-11T12:04:00.000Z",
+      status: "completed",
+      waitingSince: "2026-03-11T12:01:00.000Z",
+    })
+  })
+
+  it("classifies ai review as pending when only the request comment exists", () => {
+    expect(
+      deriveAiReviewStatus({
+        currentHeadSha: "abc123",
+        headCommitCommittedAt: "2026-03-11T12:00:00.000Z",
+        issueComments: [
+          {
+            authorLogin: "orca-bot",
+            body: "@review please",
+            createdAt: "2026-03-11T12:01:00.000Z",
+            htmlUrl: "https://github.com/peterje/orca2/pull/42#issuecomment-1",
+            id: "comment-1",
+          },
+        ],
+        reviewThreads: [],
+        reviews: [],
+        summonComment: "@review please",
+      }),
+    ).toEqual({
+      headSha: "abc123",
+      lastObservedReviewActivityAt: null,
+      status: "pending",
+      waitingSince: "2026-03-11T12:01:00.000Z",
     })
   })
 
@@ -229,6 +345,45 @@ describe("github inspection", () => {
       status: "passed",
       successfulCount: 1,
       totalCount: 3,
+    })
+  })
+
+  it("falls back to the author timestamp when github omits the committer", () => {
+    expect(
+      resolveHeadCommitCommittedAt({
+        commit: {
+          author: {
+            date: "2026-03-11T12:00:00.000Z",
+          },
+          committer: null,
+        },
+      }),
+    ).toBe("2026-03-11T12:00:00.000Z")
+  })
+
+  it("does not mark ai review pending for unrelated comments without the summon", () => {
+    expect(
+      deriveAiReviewStatus({
+        currentHeadSha: "abc123",
+        headCommitCommittedAt: "2026-03-11T12:00:00.000Z",
+        issueComments: [
+          {
+            authorLogin: "teammate",
+            body: "i will review this after lunch",
+            createdAt: "2026-03-11T12:01:00.000Z",
+            htmlUrl: "https://github.com/peterje/orca2/pull/42#issuecomment-2",
+            id: "comment-2",
+          },
+        ],
+        reviewThreads: [],
+        reviews: [],
+        summonComment: "@greptileai",
+      }),
+    ).toEqual({
+      headSha: "abc123",
+      lastObservedReviewActivityAt: null,
+      status: "not_requested",
+      waitingSince: null,
     })
   })
 })

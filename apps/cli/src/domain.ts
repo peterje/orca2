@@ -69,6 +69,96 @@ export const CheckSummarySchema = Schema.Struct({
 
 export type CheckSummary = Schema.Schema.Type<typeof CheckSummarySchema>
 
+export const PullRequestCommentSummarySchema = Schema.Struct({
+  authorLogin: Schema.NullOr(Schema.String),
+  body: Schema.String,
+  createdAt: Schema.String,
+  htmlUrl: Schema.String,
+  id: Schema.String,
+})
+
+export type PullRequestCommentSummary = Schema.Schema.Type<
+  typeof PullRequestCommentSummarySchema
+>
+
+export const ReviewSummarySchema = Schema.Struct({
+  authorAssociation: Schema.NullOr(Schema.String),
+  authorLogin: Schema.NullOr(Schema.String),
+  body: Schema.String,
+  commitId: Schema.NullOr(Schema.String),
+  htmlUrl: Schema.String,
+  id: Schema.String,
+  state: Schema.String,
+  submittedAt: Schema.NullOr(Schema.String),
+})
+
+export type ReviewSummary = Schema.Schema.Type<typeof ReviewSummarySchema>
+
+export const ReviewThreadCommentSummarySchema = Schema.Struct({
+  authorLogin: Schema.NullOr(Schema.String),
+  body: Schema.String,
+  commitId: Schema.NullOr(Schema.String),
+  createdAt: Schema.String,
+  htmlUrl: Schema.String,
+  id: Schema.String,
+  inReplyToId: Schema.NullOr(Schema.String),
+  originalCommitId: Schema.NullOr(Schema.String),
+  path: Schema.NullOr(Schema.String),
+})
+
+export type ReviewThreadCommentSummary = Schema.Schema.Type<
+  typeof ReviewThreadCommentSummarySchema
+>
+
+export const ReviewThreadSummarySchema = Schema.Struct({
+  comments: Schema.Array(ReviewThreadCommentSummarySchema),
+  id: Schema.String,
+  isResolved: Schema.Boolean,
+  path: Schema.NullOr(Schema.String),
+  updatedAt: Schema.String,
+})
+
+export type ReviewThreadSummary = Schema.Schema.Type<
+  typeof ReviewThreadSummarySchema
+>
+
+export const PullRequestReviewContextSchema = Schema.Struct({
+  issueComments: Schema.Array(PullRequestCommentSummarySchema),
+  reviewThreads: Schema.Array(ReviewThreadSummarySchema),
+  reviews: Schema.Array(ReviewSummarySchema),
+})
+
+export type PullRequestReviewContext = Schema.Schema.Type<
+  typeof PullRequestReviewContextSchema
+>
+
+export const AiReviewStatusSchema = Schema.Struct({
+  headSha: Schema.NullOr(Schema.String),
+  lastObservedReviewActivityAt: Schema.NullOr(Schema.String),
+  status: Schema.Union([
+    Schema.Literal("not_requested"),
+    Schema.Literal("pending"),
+    Schema.Literal("completed"),
+    Schema.Literal("ambiguous"),
+  ]),
+  waitingSince: Schema.NullOr(Schema.String),
+})
+
+export type AiReviewStatus = Schema.Schema.Type<typeof AiReviewStatusSchema>
+
+export const AiReviewDecisionSchema = Schema.Struct({
+  createdFollowUpIssueIdentifiers: Schema.Array(Schema.String),
+  decision: Schema.Union([
+    Schema.Literal("continue_ai_loop"),
+    Schema.Literal("waiting_for_human_review"),
+    Schema.Literal("manual_intervention"),
+  ]),
+  rationale: Schema.String,
+  reviewRoundCount: Schema.Number,
+})
+
+export type AiReviewDecision = Schema.Schema.Type<typeof AiReviewDecisionSchema>
+
 export const BlockerRefSchema = Schema.Struct({
   id: Schema.String,
   identifier: Schema.String,
@@ -111,6 +201,8 @@ export type SelectedRunnableIssue = Schema.Schema.Type<
 >
 
 export const ClaimedIssueSchema = Schema.Struct({
+  aiReviewRoundCount: Schema.NullOr(Schema.Number),
+  aiReviewStatus: Schema.NullOr(AiReviewStatusSchema),
   issueId: Schema.String,
   issueIdentifier: Schema.String,
   state: OrcaIssueStateSchema,

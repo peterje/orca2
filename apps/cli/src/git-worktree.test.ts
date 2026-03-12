@@ -201,7 +201,7 @@ describe("git worktree", () => {
       },
     )
 
-    expect(removed).toBe(true)
+    expect(removed).toBe(worktree.path)
     expect(listing.stdout.includes(worktree.path)).toBe(false)
   })
 })

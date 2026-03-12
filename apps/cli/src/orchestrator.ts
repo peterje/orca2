@@ -722,12 +722,12 @@ export const runOrchestrator = ({
           config,
           issue,
         }).pipe(
-          Effect.flatMap((removed) =>
-            removed
+          Effect.flatMap((removedPath) =>
+            removedPath !== null
               ? log(logLevel, "Info", "orca.worktree.cleaned", {
                   issue_id: issue.id,
                   issue_identifier: issue.identifier,
-                  worktree_path: null,
+                  worktree_path: removedPath,
                 })
               : Effect.void,
           ),

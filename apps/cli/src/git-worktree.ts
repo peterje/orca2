@@ -344,7 +344,7 @@ export const removeIssueWorktree = ({
       )
 
     if (!existingAtPath) {
-      return false
+      return null
     }
 
     yield* runGit({
@@ -353,7 +353,7 @@ export const removeIssueWorktree = ({
       issueIdentifier: issue.identifier,
     })
 
-    return true
+    return existingAtPath.path
   })
 
 export const ensureIssueWorktree = ({

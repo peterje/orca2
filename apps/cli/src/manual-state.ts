@@ -9,6 +9,7 @@ import type {
 import { ManualStateFileSchema } from "./domain"
 
 export class ManualStateError extends Data.TaggedError("ManualStateError")<{
+  readonly reason: "decode" | "io" | "parse"
   readonly message: string
 }> {}
 
@@ -25,33 +26,31 @@ export const decodeManualStateFile = (input: unknown) =>
 export const loadManualState = (manualStatePath: string) =>
   Effect.gen(function* () {
     const raw = yield* Effect.tryPromise({
-      try: () => readFile(manualStatePath, "utf8"),
-      catch: (cause) => {
-        if (
-          typeof cause === "object" &&
-          cause !== null &&
-          "code" in cause &&
-          cause.code === "ENOENT"
-        ) {
-          return new ManualStateError({
-            message: "manual-state-missing",
-          })
-        }
+      try: async () => {
+        try {
+          return await readFile(manualStatePath, "utf8")
+        } catch (cause) {
+          if (
+            typeof cause === "object" &&
+            cause !== null &&
+            "code" in cause &&
+            cause.code === "ENOENT"
+          ) {
+            return null
+          }
 
-        return new ManualStateError({
+          throw cause
+        }
+      },
+      catch: (cause) =>
+        new ManualStateError({
           message:
             cause instanceof Error
               ? `failed to read manual state: ${cause.message}`
               : `failed to read manual state: ${String(cause)}`,
-        })
-      },
-    }).pipe(
-      Effect.catchTag("ManualStateError", (error) =>
-        error.message === "manual-state-missing"
-          ? Effect.succeed(null)
-          : Effect.fail(error),
-      ),
-    )
+          reason: "io",
+        }),
+    })
 
     if (raw === null) {
       return emptyManualState()
@@ -65,6 +64,7 @@ export const loadManualState = (manualStatePath: string) =>
             cause instanceof Error
               ? `failed to parse manual state: ${cause.message}`
               : `failed to parse manual state: ${String(cause)}`,
+          reason: "parse",
         }),
     })
 
@@ -73,6 +73,7 @@ export const loadManualState = (manualStatePath: string) =>
         (cause) =>
           new ManualStateError({
             message: `failed to decode manual state: ${String(cause)}`,
+            reason: "decode",
           }),
       ),
     )
@@ -86,15 +87,6 @@ export const saveManualState = ({
   readonly manualStatePath: string
 }) =>
   Effect.gen(function* () {
-    const encoded = yield* decodeManualStateFile(file).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ManualStateError({
-            message: `failed to validate manual state: ${String(cause)}`,
-          }),
-      ),
-    )
-
     yield* Effect.tryPromise({
       try: () => mkdir(path.dirname(manualStatePath), { recursive: true }),
       catch: (cause) =>
@@ -103,6 +95,7 @@ export const saveManualState = ({
             cause instanceof Error
               ? `failed to prepare manual state directory: ${cause.message}`
               : `failed to prepare manual state directory: ${String(cause)}`,
+          reason: "io",
         }),
     })
 
@@ -110,7 +103,7 @@ export const saveManualState = ({
       try: () =>
         writeFile(
           manualStatePath,
-          `${JSON.stringify(encoded, null, 2)}\n`,
+          `${JSON.stringify(file, null, 2)}\n`,
           "utf8",
         ),
       catch: (cause) =>
@@ -119,6 +112,7 @@ export const saveManualState = ({
             cause instanceof Error
               ? `failed to write manual state: ${cause.message}`
               : `failed to write manual state: ${String(cause)}`,
+          reason: "io",
         }),
     })
   })

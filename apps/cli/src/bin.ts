@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { BunRuntime } from "@effect/platform-bun"
-import { program } from "./index"
+import { Effect } from "effect"
+import { platformLayer, program } from "./index"
 
-BunRuntime.runMain(program)
+await Effect.runPromise(Effect.provide(program, platformLayer))

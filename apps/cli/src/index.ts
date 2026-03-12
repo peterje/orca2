@@ -35,7 +35,13 @@ export const cli = Command.make(
     ),
 ).pipe(Command.withDescription("poll Linear and track the runnable orca issue"))
 
-export const program = Command.run(cli, { version: "0.0.0" }).pipe(
+export const platformLayer = Layer.mergeAll(
+  BunServices.layer,
+  FetchHttpClient.layer,
+)
+
+export const program = cli.pipe(
+  Command.run({ version: "0.0.0" }),
   Effect.catch((error: unknown) =>
     Effect.sync(() => {
       writeLogLine("Error", "orca.boot.failed", {
@@ -44,5 +50,4 @@ export const program = Command.run(cli, { version: "0.0.0" }).pipe(
       process.exitCode = 1
     }),
   ),
-  Effect.provide(Layer.mergeAll(BunServices.layer, FetchHttpClient.layer)),
 )

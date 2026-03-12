@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { emptyReviewContext } from "./ai-review"
 import {
   applyImplementationOutcome,
   applyManualInterventionState,
@@ -23,6 +24,57 @@ const issue = {
   title: "run implementation attempts",
   updatedAt: "2026-03-11T12:01:00.000Z",
 }
+
+const pullRequest = {
+  baseRefName: "main",
+  headRefName: "pet-47",
+  headSha: "abc123",
+  isDraft: false,
+  number: 42,
+  owner: "peterje",
+  provider: "github" as const,
+  repo: "orca2",
+  state: "open" as const,
+  title: "feat: run implementation attempts",
+  url: "https://github.com/peterje/orca2/pull/42",
+}
+
+const issueState = (overrides: Record<string, unknown> = {}) => ({
+  aiReviewRoundCount: null,
+  aiReviewStatus: null,
+  branchName: null,
+  checkSummary: null,
+  currentHeadSha: null,
+  currentPullRequest: null,
+  lastError: null,
+  reviewContext: emptyReviewContext,
+  retryCount: 0,
+  retryDueAt: null,
+  state: "Todo" as const,
+  worktreePath: null,
+  ...overrides,
+})
+
+const foundPullRequestInspection = (
+  overrides: Record<string, unknown> = {},
+) => ({
+  aiReviewStatus: null,
+  associationSource: "linear" as const,
+  branchNames: ["pet-47"],
+  checkSummary: {
+    failedCount: 0,
+    pendingCount: 0,
+    status: "passed" as const,
+    successfulCount: 3,
+    totalCount: 3,
+  },
+  headSha: pullRequest.headSha,
+  kind: "found-pr" as const,
+  pullRequest,
+  reviewContext: emptyReviewContext,
+  reviewRoundCount: 1,
+  ...overrides,
+})
 
 describe("orchestrator", () => {
   it("escalates retryable failures to manual intervention after max retries", () => {
@@ -63,17 +115,10 @@ describe("orchestrator", () => {
       issueStates: new Map([
         [
           issue.id,
-          {
-            branchName: null,
-            checkSummary: null,
-            currentHeadSha: null,
-            currentPullRequest: null,
-            lastError: null,
-            retryCount: 0,
-            retryDueAt: null,
-            state: "Implementing" as const,
+          issueState({
+            state: "Implementing",
             worktreePath: "/repo/.orca/worktrees/pet-47",
-          },
+          }),
         ],
       ]),
       outcome: {
@@ -83,17 +128,13 @@ describe("orchestrator", () => {
       },
     })
 
-    expect(nextState.get(issue.id)).toEqual({
-      branchName: "pet-47",
-      checkSummary: null,
-      currentHeadSha: null,
-      currentPullRequest: null,
-      lastError: null,
-      retryCount: 0,
-      retryDueAt: null,
-      state: "WaitingForPr",
-      worktreePath: "/repo/.orca/worktrees/pet-47",
-    })
+    expect(nextState.get(issue.id)).toEqual(
+      issueState({
+        branchName: "pet-47",
+        state: "WaitingForPr",
+        worktreePath: "/repo/.orca/worktrees/pet-47",
+      }),
+    )
   })
 
   it("preserves the tracked worktree path for manual intervention", () => {
@@ -102,33 +143,27 @@ describe("orchestrator", () => {
       issueStates: new Map([
         [
           issue.id,
-          {
+          issueState({
             branchName: "pet-47",
-            checkSummary: null,
-            currentHeadSha: null,
-            currentPullRequest: null,
-            lastError: null,
             retryCount: 2,
             retryDueAt: "2026-03-11T12:05:00.000Z",
-            state: "Implementing" as const,
+            state: "Implementing",
             worktreePath: "/repo/.orca/worktrees/pet-47",
-          },
+          }),
         ],
       ]),
       message: "agent failed permanently",
     })
 
-    expect(nextState.get(issue.id)).toEqual({
-      branchName: "pet-47",
-      checkSummary: null,
-      currentHeadSha: null,
-      currentPullRequest: null,
-      lastError: "agent failed permanently",
-      retryCount: 2,
-      retryDueAt: null,
-      state: "ManualIntervention",
-      worktreePath: "/repo/.orca/worktrees/pet-47",
-    })
+    expect(nextState.get(issue.id)).toEqual(
+      issueState({
+        branchName: "pet-47",
+        lastError: "agent failed permanently",
+        retryCount: 2,
+        state: "ManualIntervention",
+        worktreePath: "/repo/.orca/worktrees/pet-47",
+      }),
+    )
   })
 
   it("moves a branch-associated pr with pending checks into waiting for ci", () => {
@@ -137,22 +172,16 @@ describe("orchestrator", () => {
       issueStates: new Map([
         [
           issue.id,
-          {
+          issueState({
             branchName: "pet-47",
-            checkSummary: null,
-            currentHeadSha: null,
-            currentPullRequest: null,
-            lastError: null,
             retryCount: 1,
-            retryDueAt: null,
-            state: "WaitingForPr" as const,
+            state: "WaitingForPr",
             worktreePath: "/repo/.orca/worktrees/pet-47",
-          },
+          }),
         ],
       ]),
-      inspection: {
+      inspection: foundPullRequestInspection({
         associationSource: "branch",
-        branchNames: ["pet-47"],
         checkSummary: {
           failedCount: 0,
           pendingCount: 2,
@@ -160,88 +189,74 @@ describe("orchestrator", () => {
           successfulCount: 0,
           totalCount: 2,
         },
-        headSha: "abc123",
-        kind: "found-pr",
-        pullRequest: {
-          baseRefName: "main",
-          headRefName: "pet-47",
-          headSha: "abc123",
-          isDraft: false,
-          number: 42,
-          owner: "peterje",
-          provider: "github" as const,
-          repo: "orca2",
-          state: "open" as const,
-          title: "feat: run implementation attempts",
-          url: "https://github.com/peterje/orca2/pull/42",
-        },
-      },
+      }),
     })
 
-    expect(nextState.get(issue.id)).toEqual({
-      branchName: "pet-47",
-      checkSummary: {
-        failedCount: 0,
-        pendingCount: 2,
-        status: "pending",
-        successfulCount: 0,
-        totalCount: 2,
-      },
-      currentHeadSha: "abc123",
-      currentPullRequest: {
-        baseRefName: "main",
-        headRefName: "pet-47",
-        headSha: "abc123",
-        isDraft: false,
-        number: 42,
-        owner: "peterje",
-        provider: "github",
-        repo: "orca2",
-        state: "open",
-        title: "feat: run implementation attempts",
-        url: "https://github.com/peterje/orca2/pull/42",
-      },
-      lastError: null,
-      retryCount: 1,
-      retryDueAt: null,
-      state: "WaitingForCi",
-      worktreePath: "/repo/.orca/worktrees/pet-47",
-    })
+    expect(nextState.get(issue.id)).toEqual(
+      issueState({
+        branchName: "pet-47",
+        checkSummary: {
+          failedCount: 0,
+          pendingCount: 2,
+          status: "pending",
+          successfulCount: 0,
+          totalCount: 2,
+        },
+        currentHeadSha: "abc123",
+        currentPullRequest: pullRequest,
+        retryCount: 1,
+        state: "WaitingForCi",
+        worktreePath: "/repo/.orca/worktrees/pet-47",
+      }),
+    )
   })
 
-  it("parks green ci in waiting for ai review and records the current head sha", () => {
+  it("parks green ci in waiting for ai review when review activity is pending", () => {
     const nextState = updateIssueStateForGitHubInspection({
       issue,
       issueStates: new Map(),
-      inspection: {
-        associationSource: "linear",
-        branchNames: ["pet-47"],
-        checkSummary: {
-          failedCount: 0,
-          pendingCount: 0,
-          status: "passed",
-          successfulCount: 3,
-          totalCount: 3,
+      inspection: foundPullRequestInspection({
+        aiReviewStatus: {
+          headSha: "def456",
+          lastObservedReviewActivityAt: null,
+          status: "pending",
+          waitingSince: "2026-03-11T12:04:00.000Z",
         },
         headSha: "def456",
-        kind: "found-pr",
         pullRequest: {
-          baseRefName: "main",
-          headRefName: "pet-47",
+          ...pullRequest,
           headSha: "def456",
-          isDraft: false,
-          number: 42,
-          owner: "peterje",
-          provider: "github" as const,
-          repo: "orca2",
-          state: "open" as const,
-          title: "feat: run implementation attempts",
-          url: "https://github.com/peterje/orca2/pull/42",
         },
-      },
+        reviewRoundCount: 2,
+      }),
     })
 
     expect(nextState.get(issue.id)?.state).toBe("WaitingForAiReview")
+    expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
+    expect(nextState.get(issue.id)?.aiReviewRoundCount).toBe(2)
+  })
+
+  it("moves green ci into evaluating ai review when review activity completed", () => {
+    const nextState = updateIssueStateForGitHubInspection({
+      issue,
+      issueStates: new Map(),
+      inspection: foundPullRequestInspection({
+        aiReviewStatus: {
+          headSha: "def456",
+          lastObservedReviewActivityAt: "2026-03-11T12:06:00.000Z",
+          status: "completed",
+          waitingSince: "2026-03-11T12:04:00.000Z",
+        },
+        headSha: "def456",
+        pullRequest: {
+          ...pullRequest,
+          headSha: "def456",
+        },
+        reviewRoundCount: 2,
+      }),
+    })
+
+    expect(nextState.get(issue.id)?.state).toBe("EvaluatingAiReview")
     expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
   })
 
@@ -249,32 +264,14 @@ describe("orchestrator", () => {
     const nextState = updateIssueStateForGitHubInspection({
       issue,
       issueStates: new Map(),
-      inspection: {
-        associationSource: "linear",
-        branchNames: ["pet-47"],
-        checkSummary: {
-          failedCount: 0,
-          pendingCount: 0,
-          status: "passed",
-          successfulCount: 3,
-          totalCount: 3,
-        },
-        headSha: "draft456",
-        kind: "found-pr",
+      inspection: foundPullRequestInspection({
         pullRequest: {
-          baseRefName: "main",
-          headRefName: "pet-47",
+          ...pullRequest,
           headSha: "draft456",
           isDraft: true,
-          number: 42,
-          owner: "peterje",
-          provider: "github" as const,
-          repo: "orca2",
-          state: "open" as const,
-          title: "feat: run implementation attempts",
-          url: "https://github.com/peterje/orca2/pull/42",
         },
-      },
+        headSha: "draft456",
+      }),
     })
 
     expect(nextState.get(issue.id)?.state).toBe("WaitingForCi")
@@ -287,7 +284,8 @@ describe("orchestrator", () => {
       issueStates: new Map([
         [
           issue.id,
-          {
+          issueState({
+            aiReviewRoundCount: 2,
             branchName: "pet-47",
             checkSummary: {
               failedCount: 0,
@@ -298,52 +296,28 @@ describe("orchestrator", () => {
             },
             currentHeadSha: "def456",
             currentPullRequest: {
-              baseRefName: "main",
-              headRefName: "pet-47",
+              ...pullRequest,
               headSha: "def456",
-              isDraft: false,
-              number: 42,
-              owner: "peterje",
-              provider: "github" as const,
-              repo: "orca2",
-              state: "open" as const,
-              title: "feat: run implementation attempts",
-              url: "https://github.com/peterje/orca2/pull/42",
             },
-            lastError: null,
-            retryCount: 0,
-            retryDueAt: null,
-            state: "WaitingForHumanReview" as const,
+            state: "WaitingForHumanReview",
             worktreePath: "/repo/.orca/worktrees/pet-47",
-          },
+          }),
         ],
       ]),
-      inspection: {
-        associationSource: "linear",
-        branchNames: ["pet-47"],
-        checkSummary: {
-          failedCount: 0,
-          pendingCount: 0,
-          status: "passed",
-          successfulCount: 3,
-          totalCount: 3,
+      inspection: foundPullRequestInspection({
+        aiReviewStatus: {
+          headSha: "updated-sha",
+          lastObservedReviewActivityAt: "2026-03-11T12:10:00.000Z",
+          status: "completed",
+          waitingSince: "2026-03-11T12:08:00.000Z",
         },
         headSha: "updated-sha",
-        kind: "found-pr",
         pullRequest: {
-          baseRefName: "main",
-          headRefName: "pet-47",
+          ...pullRequest,
           headSha: "updated-sha",
-          isDraft: false,
-          number: 42,
-          owner: "peterje",
-          provider: "github" as const,
-          repo: "orca2",
-          state: "open" as const,
-          title: "feat: run implementation attempts",
-          url: "https://github.com/peterje/orca2/pull/42",
         },
-      },
+        reviewRoundCount: 3,
+      }),
     })
 
     expect(nextState.get(issue.id)?.state).toBe("WaitingForHumanReview")
@@ -356,7 +330,7 @@ describe("orchestrator", () => {
       issueStates: new Map([
         [
           issue.id,
-          {
+          issueState({
             branchName: "pet-47",
             checkSummary: {
               failedCount: 0,
@@ -367,24 +341,12 @@ describe("orchestrator", () => {
             },
             currentHeadSha: "def456",
             currentPullRequest: {
-              baseRefName: "main",
-              headRefName: "pet-47",
+              ...pullRequest,
               headSha: "def456",
-              isDraft: false,
-              number: 42,
-              owner: "peterje",
-              provider: "github" as const,
-              repo: "orca2",
-              state: "open" as const,
-              title: "feat: run implementation attempts",
-              url: "https://github.com/peterje/orca2/pull/42",
             },
-            lastError: null,
-            retryCount: 0,
-            retryDueAt: null,
-            state: "WaitingForCi" as const,
+            state: "WaitingForCi",
             worktreePath: "/repo/.orca/worktrees/pet-47",
-          },
+          }),
         ],
       ]),
       inspection: {
@@ -393,17 +355,13 @@ describe("orchestrator", () => {
       },
     })
 
-    expect(nextState.get(issue.id)).toEqual({
-      branchName: "pet-47",
-      checkSummary: null,
-      currentHeadSha: null,
-      currentPullRequest: null,
-      lastError: null,
-      retryCount: 0,
-      retryDueAt: null,
-      state: "WaitingForPr",
-      worktreePath: "/repo/.orca/worktrees/pet-47",
-    })
+    expect(nextState.get(issue.id)).toEqual(
+      issueState({
+        branchName: "pet-47",
+        state: "WaitingForPr",
+        worktreePath: "/repo/.orca/worktrees/pet-47",
+      }),
+    )
   })
 
   it("enters manual intervention when github state is ambiguous", () => {
@@ -417,16 +375,11 @@ describe("orchestrator", () => {
       },
     })
 
-    expect(nextState.get(issue.id)).toEqual({
-      branchName: null,
-      checkSummary: null,
-      currentHeadSha: null,
-      currentPullRequest: null,
-      lastError: "multiple pull requests matched branch pet-47 for PET-47",
-      retryCount: 0,
-      retryDueAt: null,
-      state: "ManualIntervention",
-      worktreePath: null,
-    })
+    expect(nextState.get(issue.id)).toEqual(
+      issueState({
+        lastError: "multiple pull requests matched branch pet-47 for PET-47",
+        state: "ManualIntervention",
+      }),
+    )
   })
 })

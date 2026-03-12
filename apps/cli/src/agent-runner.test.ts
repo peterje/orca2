@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test"
 import {
   opencodeStartupTimeoutPrefix,
   runOpencodeAgent,
+  runOpencodeAgentText,
 } from "./agent-runner"
 
 const baseConfig = {
@@ -205,5 +206,41 @@ describe("agent runner", () => {
     expect(failure.reason).toBe("turn-timeout")
     expect(failure.retryable).toBe(true)
     expect(closeFinished).toBe(true)
+  })
+
+  it("returns assistant text parts for structured-output callers", async () => {
+    const output = await Effect.runPromise(
+      runOpencodeAgentText({
+        config: baseConfig,
+        createClient: () => ({
+          session: {
+            create: async () => ({
+              data: {
+                id: "ses_123",
+              },
+            }),
+            prompt: async () => ({
+              data: {
+                info: {},
+                parts: [
+                  {
+                    text: '{"decision":"waiting_for_human_review"}',
+                    type: "text",
+                  },
+                ],
+              },
+            }),
+          },
+        }),
+        createServer: async () => ({
+          close() {},
+          url: "http://127.0.0.1:4096",
+        }),
+        cwd: "/repo",
+        prompt: "return json",
+      }),
+    )
+
+    expect(output).toBe('{"decision":"waiting_for_human_review"}')
   })
 })

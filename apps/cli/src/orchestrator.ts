@@ -1,10 +1,18 @@
 import { Cause, Duration, Effect, Ref } from "effect"
+import {
+  applyAiReviewDecision,
+  emptyReviewContext,
+  runAiReviewEvaluationAttempt,
+  runAiReviewRemediationAttempt,
+} from "./ai-review"
 import { AgentRunnerError } from "./agent-runner"
 import type {
+  AiReviewStatus,
   CheckSummary,
   NormalizedIssue,
   OrcaIssueState,
   PullRequest,
+  PullRequestReviewContext,
   RuntimeSnapshot,
   SelectedRunnableIssue,
 } from "./domain"
@@ -20,11 +28,14 @@ import { log } from "./logging"
 import type { OrcaConfig } from "./orca-config"
 
 interface IssueExecutionState {
+  readonly aiReviewRoundCount: number | null
+  readonly aiReviewStatus: AiReviewStatus | null
   readonly branchName: string | null
   readonly checkSummary: CheckSummary | null
   readonly currentHeadSha: string | null
   readonly currentPullRequest: PullRequest | null
   readonly lastError: string | null
+  readonly reviewContext: PullRequestReviewContext
   readonly retryCount: number
   readonly retryDueAt: string | null
   readonly state: OrcaIssueState
@@ -107,7 +118,11 @@ const isRunnableIssueState = (
       : new Date(issueState.retryDueAt).getTime() <= now
   }
 
-  return issueState.state === "Todo"
+  return (
+    issueState.state === "Todo" ||
+    issueState.state === "EvaluatingAiReview" ||
+    issueState.state === "AddressingAiReviewFeedback"
+  )
 }
 
 export const selectRunnableIssue = (
@@ -155,6 +170,8 @@ export const buildRuntimeSnapshot = (
 
       return [
         {
+          aiReviewRoundCount: issueState.aiReviewRoundCount,
+          aiReviewStatus: issueState.aiReviewStatus,
           branchName: issueState.branchName,
           checkSummary: issueState.checkSummary,
           currentHeadSha: issueState.currentHeadSha,
@@ -248,21 +265,22 @@ export const updateIssueStateForGitHubInspection = ({
   if (inspection.kind === "missing-pr") {
     if (
       currentIssueState === undefined ||
-      ![
-        "WaitingForAiReview",
-        "WaitingForCi",
-        "WaitingForPr",
-      ].includes(currentIssueState.state)
+      !["WaitingForAiReview", "WaitingForCi", "WaitingForPr"].includes(
+        currentIssueState.state,
+      )
     ) {
       return issueStates
     }
 
     return updateIssueState(issueStates, issue, {
+      aiReviewRoundCount: currentIssueState.aiReviewRoundCount,
+      aiReviewStatus: currentIssueState.aiReviewStatus,
       branchName: currentIssueState.branchName,
       checkSummary: null,
       currentHeadSha: null,
       currentPullRequest: null,
       lastError: null,
+      reviewContext: currentIssueState.reviewContext,
       retryCount: currentIssueState.retryCount,
       retryDueAt: null,
       state: "WaitingForPr",
@@ -280,11 +298,14 @@ export const updateIssueStateForGitHubInspection = ({
 
   if (inspection.checkSummary.status === "pending") {
     return updateIssueState(issueStates, issue, {
+      aiReviewRoundCount: currentIssueState?.aiReviewRoundCount ?? null,
+      aiReviewStatus: currentIssueState?.aiReviewStatus ?? null,
       branchName: inspection.pullRequest.headRefName,
       checkSummary: inspection.checkSummary,
       currentHeadSha: inspection.headSha,
       currentPullRequest: inspection.pullRequest,
       lastError: null,
+      reviewContext: currentIssueState?.reviewContext ?? emptyReviewContext,
       retryCount: currentIssueState?.retryCount ?? 0,
       retryDueAt: null,
       state: "WaitingForCi",
@@ -293,16 +314,37 @@ export const updateIssueStateForGitHubInspection = ({
   }
 
   if (inspection.checkSummary.status === "passed") {
+    if (inspection.aiReviewStatus?.status === "ambiguous") {
+      return applyManualInterventionState({
+        issue,
+        issueStates,
+        branchName: inspection.pullRequest.headRefName,
+        checkSummary: inspection.checkSummary,
+        currentHeadSha: inspection.headSha,
+        currentPullRequest: inspection.pullRequest,
+        message: `unable to determine ai review status for ${issue.identifier} on ${inspection.headSha}`,
+      })
+    }
+
     const nextState: OrcaIssueState = inspection.pullRequest.isDraft
       ? "WaitingForCi"
-      : "WaitingForAiReview"
+      : inspection.aiReviewStatus?.status === "completed"
+        ? "EvaluatingAiReview"
+        : "WaitingForAiReview"
 
     return updateIssueState(issueStates, issue, {
+      aiReviewRoundCount:
+        inspection.reviewRoundCount ??
+        currentIssueState?.aiReviewRoundCount ??
+        1,
+      aiReviewStatus:
+        inspection.aiReviewStatus ?? currentIssueState?.aiReviewStatus ?? null,
       branchName: inspection.pullRequest.headRefName,
       checkSummary: inspection.checkSummary,
       currentHeadSha: inspection.headSha,
       currentPullRequest: inspection.pullRequest,
       lastError: null,
+      reviewContext: inspection.reviewContext,
       retryCount: currentIssueState?.retryCount ?? 0,
       retryDueAt: null,
       state: nextState,
@@ -355,6 +397,9 @@ const reconcileIssuesWithGitHub = ({
 
       currentIssueStates = yield* inspectIssueGitHubState({
         config,
+        currentAiReviewStatus: currentIssueState?.aiReviewStatus,
+        currentHeadSha: currentIssueState?.currentHeadSha,
+        currentReviewRoundCount: currentIssueState?.aiReviewRoundCount,
         issue,
         trackedBranchName: currentIssueState?.branchName,
       }).pipe(
@@ -397,11 +442,14 @@ export const applyImplementationOutcome = ({
   }
 
   return updateIssueState(issueStates, issue, {
+    aiReviewRoundCount: null,
+    aiReviewStatus: null,
     branchName: outcome.branchName,
     checkSummary: null,
     currentHeadSha: null,
     currentPullRequest: null,
     lastError: null,
+    reviewContext: emptyReviewContext,
     retryCount: 0,
     retryDueAt: null,
     state: "WaitingForPr",
@@ -429,6 +477,8 @@ export const applyManualInterventionState = ({
   readonly worktreePath?: string | null | undefined
 }): IssueStateMap =>
   updateIssueState(issueStates, issue, {
+    aiReviewRoundCount: issueStates.get(issue.id)?.aiReviewRoundCount ?? null,
+    aiReviewStatus: issueStates.get(issue.id)?.aiReviewStatus ?? null,
     branchName:
       branchName === undefined
         ? (issueStates.get(issue.id)?.branchName ?? null)
@@ -446,6 +496,8 @@ export const applyManualInterventionState = ({
         ? (issueStates.get(issue.id)?.currentPullRequest ?? null)
         : currentPullRequest,
     lastError: message,
+    reviewContext:
+      issueStates.get(issue.id)?.reviewContext ?? emptyReviewContext,
     retryCount: issueStates.get(issue.id)?.retryCount ?? 0,
     retryDueAt: null,
     state: "ManualIntervention",
@@ -506,6 +558,10 @@ export const runOrchestrator = ({
         yield* Ref.set(
           issueStatesRef,
           updateIssueState(currentIssueStates, issue, {
+            aiReviewRoundCount:
+              currentIssueStates.get(issue.id)?.aiReviewRoundCount ?? null,
+            aiReviewStatus:
+              currentIssueStates.get(issue.id)?.aiReviewStatus ?? null,
             branchName: currentIssueStates.get(issue.id)?.branchName ?? null,
             checkSummary:
               currentIssueStates.get(issue.id)?.checkSummary ?? null,
@@ -514,6 +570,9 @@ export const runOrchestrator = ({
             currentPullRequest:
               currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
             lastError: error.message,
+            reviewContext:
+              currentIssueStates.get(issue.id)?.reviewContext ??
+              emptyReviewContext,
             retryCount: retryPlan.retryCount,
             retryDueAt: retryPlan.retryDueAt,
             state: retryPlan.state,
@@ -539,8 +598,19 @@ export const runOrchestrator = ({
 
     const dispatchIssue = (issue: NormalizedIssue) =>
       Effect.gen(function* () {
+        const currentIssueState = (yield* Ref.get(issueStatesRef)).get(issue.id)
+        const dispatchState: IssueExecutionState["state"] =
+          currentIssueState?.state === "EvaluatingAiReview" ||
+          currentIssueState?.state === "AddressingAiReviewFeedback"
+            ? currentIssueState.state
+            : "Implementing"
+
         yield* Ref.update(issueStatesRef, (currentIssueStates) =>
           updateIssueState(currentIssueStates, issue, {
+            aiReviewRoundCount:
+              currentIssueStates.get(issue.id)?.aiReviewRoundCount ?? null,
+            aiReviewStatus:
+              currentIssueStates.get(issue.id)?.aiReviewStatus ?? null,
             branchName: currentIssueStates.get(issue.id)?.branchName ?? null,
             checkSummary:
               currentIssueStates.get(issue.id)?.checkSummary ?? null,
@@ -549,9 +619,12 @@ export const runOrchestrator = ({
             currentPullRequest:
               currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
             lastError: null,
+            reviewContext:
+              currentIssueStates.get(issue.id)?.reviewContext ??
+              emptyReviewContext,
             retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
             retryDueAt: null,
-            state: "Implementing",
+            state: dispatchState,
             worktreePath:
               currentIssueStates.get(issue.id)?.worktreePath ?? null,
           }),
@@ -562,43 +635,175 @@ export const runOrchestrator = ({
         yield* log(logLevel, "Info", "orca.issue.dispatch.started", {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
-          state: "Implementing",
+          state: dispatchState,
         })
 
-        yield* runImplementationAttempt({
-          config,
-          issue,
-          onWorktreeReady: (worktree) =>
-            Ref.update(issueStatesRef, (currentIssueStates) =>
-              updateIssueState(currentIssueStates, issue, {
-                branchName: worktree.branchName,
-                checkSummary:
-                  currentIssueStates.get(issue.id)?.checkSummary ?? null,
-                currentHeadSha:
-                  currentIssueStates.get(issue.id)?.currentHeadSha ?? null,
-                currentPullRequest:
-                  currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
-                lastError: null,
-                retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
-                retryDueAt: null,
-                state: "Implementing",
-                worktreePath: worktree.path,
-              }),
-            ).pipe(Effect.andThen(refreshSnapshot)),
-        }).pipe(
-          Effect.flatMap((outcome) =>
-            Ref.get(activeIssuesRef).pipe(
-              Effect.flatMap((activeIssues) =>
-                Ref.update(issueStatesRef, (currentIssueStates) =>
-                  applyImplementationOutcome({
-                    activeIssues,
+        const trackWorktree = (
+          state: IssueExecutionState["state"],
+          worktree: {
+            readonly branchName: string
+            readonly path: string
+          },
+        ) =>
+          Ref.update(issueStatesRef, (currentIssueStates) =>
+            updateIssueState(currentIssueStates, issue, {
+              aiReviewRoundCount:
+                currentIssueStates.get(issue.id)?.aiReviewRoundCount ?? null,
+              aiReviewStatus:
+                currentIssueStates.get(issue.id)?.aiReviewStatus ?? null,
+              branchName: worktree.branchName,
+              checkSummary:
+                currentIssueStates.get(issue.id)?.checkSummary ?? null,
+              currentHeadSha:
+                currentIssueStates.get(issue.id)?.currentHeadSha ?? null,
+              currentPullRequest:
+                currentIssueStates.get(issue.id)?.currentPullRequest ?? null,
+              lastError: null,
+              reviewContext:
+                currentIssueStates.get(issue.id)?.reviewContext ??
+                emptyReviewContext,
+              retryCount: currentIssueStates.get(issue.id)?.retryCount ?? 0,
+              retryDueAt: null,
+              state,
+              worktreePath: worktree.path,
+            }),
+          ).pipe(Effect.andThen(refreshSnapshot))
+
+        const runDispatchedAttempt =
+          dispatchState === "EvaluatingAiReview"
+            ? (() => {
+                if (
+                  currentIssueState?.currentPullRequest === null ||
+                  currentIssueState?.currentPullRequest === undefined
+                ) {
+                  return Effect.fail(
+                    new AgentRunnerError({
+                      diagnostics: [],
+                      message: `missing pull request context for ${issue.identifier} ai review evaluation`,
+                      reason: "protocol-error",
+                      retryable: false,
+                    }),
+                  )
+                }
+
+                return runAiReviewEvaluationAttempt({
+                  config,
+                  issue,
+                  onWorktreeReady: (worktree) =>
+                    trackWorktree("EvaluatingAiReview", worktree),
+                  pullRequest: currentIssueState.currentPullRequest,
+                  reviewContext: currentIssueState.reviewContext,
+                  reviewRoundCount: currentIssueState.aiReviewRoundCount ?? 1,
+                }).pipe(
+                  Effect.flatMap(({ decision, worktreePath }) =>
+                    Ref.update(issueStatesRef, (currentIssueStates) => {
+                      const decisionOutcome = applyAiReviewDecision({
+                        currentHeadSha:
+                          currentIssueStates.get(issue.id)?.currentHeadSha ??
+                          null,
+                        decision,
+                      })
+
+                      return updateIssueState(currentIssueStates, issue, {
+                        aiReviewRoundCount: decision.reviewRoundCount,
+                        aiReviewStatus:
+                          currentIssueStates.get(issue.id)?.aiReviewStatus ??
+                          null,
+                        branchName:
+                          currentIssueStates.get(issue.id)?.branchName ?? null,
+                        checkSummary:
+                          currentIssueStates.get(issue.id)?.checkSummary ??
+                          null,
+                        currentHeadSha:
+                          currentIssueStates.get(issue.id)?.currentHeadSha ??
+                          null,
+                        currentPullRequest:
+                          currentIssueStates.get(issue.id)
+                            ?.currentPullRequest ?? null,
+                        lastError: decisionOutcome.lastError,
+                        reviewContext:
+                          currentIssueStates.get(issue.id)?.reviewContext ??
+                          emptyReviewContext,
+                        retryCount:
+                          currentIssueStates.get(issue.id)?.retryCount ?? 0,
+                        retryDueAt: null,
+                        state: decisionOutcome.nextState,
+                        worktreePath,
+                      })
+                    }),
+                  ),
+                )
+              })()
+            : dispatchState === "AddressingAiReviewFeedback"
+              ? (() => {
+                  if (
+                    currentIssueState?.currentPullRequest === null ||
+                    currentIssueState?.currentPullRequest === undefined
+                  ) {
+                    return Effect.fail(
+                      new AgentRunnerError({
+                        diagnostics: [],
+                        message: `missing pull request context for ${issue.identifier} ai review remediation`,
+                        reason: "protocol-error",
+                        retryable: false,
+                      }),
+                    )
+                  }
+
+                  return runAiReviewRemediationAttempt({
+                    config,
                     issue,
-                    issueStates: currentIssueStates,
-                    outcome,
-                  }),
-                ),
-              ),
-            ),
+                    onWorktreeReady: (worktree) =>
+                      trackWorktree("AddressingAiReviewFeedback", worktree),
+                    pullRequest: currentIssueState.currentPullRequest,
+                    reviewContext: currentIssueState.reviewContext,
+                    reviewRoundCount: currentIssueState.aiReviewRoundCount ?? 1,
+                  }).pipe(
+                    Effect.flatMap((outcome) =>
+                      Ref.get(activeIssuesRef).pipe(
+                        Effect.flatMap((activeIssues) =>
+                          Ref.update(issueStatesRef, (currentIssueStates) =>
+                            applyImplementationOutcome({
+                              activeIssues,
+                              issue,
+                              issueStates: currentIssueStates,
+                              outcome: {
+                                branchName: outcome.branchName,
+                                state: "WaitingForPr",
+                                worktreePath: outcome.worktreePath,
+                              },
+                            }),
+                          ),
+                        ),
+                      ),
+                    ),
+                  )
+                })()
+              : runImplementationAttempt({
+                  config,
+                  issue,
+                  onWorktreeReady: (worktree) =>
+                    trackWorktree("Implementing", worktree),
+                }).pipe(
+                  Effect.flatMap((outcome) =>
+                    Ref.get(activeIssuesRef).pipe(
+                      Effect.flatMap((activeIssues) =>
+                        Ref.update(issueStatesRef, (currentIssueStates) =>
+                          applyImplementationOutcome({
+                            activeIssues,
+                            issue,
+                            issueStates: currentIssueStates,
+                            outcome,
+                          }),
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+
+        yield* runDispatchedAttempt.pipe(
+          Effect.flatMap((outcome) =>
+            Ref.get(issueStatesRef).pipe(Effect.as(outcome)),
           ),
           Effect.tap(() =>
             log(logLevel, "Info", "orca.issue.dispatch.completed", {
@@ -714,7 +919,9 @@ export const runOrchestrator = ({
           )
           const githubReconciledIssueStates = yield* reconcileIssuesWithGitHub({
             config: config.github,
-            issues: issues.filter((issue) => issue.normalizedState !== "terminal"),
+            issues: issues.filter(
+              (issue) => issue.normalizedState !== "terminal",
+            ),
             issueStates: reconciledIssueStates,
           })
 

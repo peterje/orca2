@@ -1,12 +1,18 @@
 import { Data, Effect, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import type {
+  AiReviewStatus,
   CheckSummary,
   LinkedPullRequestRef,
   NormalizedIssue,
   PullRequest,
+  PullRequestCommentSummary,
+  PullRequestReviewContext,
+  ReviewSummary,
+  ReviewThreadSummary,
 } from "./domain"
 import { sanitizeIssueIdentifier } from "./git-worktree"
+import { emptyReviewContext, nextReviewRoundCount } from "./ai-review"
 
 const PullRequestStateSchema = Schema.Union([
   Schema.Literal("open"),
@@ -21,11 +27,13 @@ const RawRepositorySchema = Schema.Struct({
 })
 
 const RawPullRequestSchema = Schema.Struct({
+  created_at: Schema.String,
   number: Schema.Number,
   html_url: Schema.String,
   title: Schema.String,
   state: PullRequestStateSchema,
   draft: Schema.Boolean,
+  updated_at: Schema.String,
   head: Schema.Struct({
     ref: Schema.String,
     sha: Schema.String,
@@ -38,6 +46,63 @@ const RawPullRequestSchema = Schema.Struct({
 })
 
 const RawPullRequestsSchema = Schema.Array(RawPullRequestSchema)
+
+const RawIssueCommentSchema = Schema.Struct({
+  body: Schema.String,
+  created_at: Schema.String,
+  html_url: Schema.String,
+  id: Schema.Number,
+  user: Schema.NullOr(
+    Schema.Struct({
+      login: Schema.String,
+    }),
+  ),
+})
+
+const RawIssueCommentsSchema = Schema.Array(RawIssueCommentSchema)
+
+const RawReviewSchema = Schema.Struct({
+  body: Schema.NullOr(Schema.String),
+  commit_id: Schema.NullOr(Schema.String),
+  html_url: Schema.String,
+  id: Schema.Number,
+  state: Schema.String,
+  submitted_at: Schema.NullOr(Schema.String),
+  author_association: Schema.String,
+  user: Schema.NullOr(
+    Schema.Struct({
+      login: Schema.String,
+    }),
+  ),
+})
+
+const RawReviewsSchema = Schema.Array(RawReviewSchema)
+
+const RawReviewCommentSchema = Schema.Struct({
+  body: Schema.String,
+  commit_id: Schema.NullOr(Schema.String),
+  created_at: Schema.String,
+  html_url: Schema.String,
+  id: Schema.Number,
+  in_reply_to_id: Schema.NullOr(Schema.Number),
+  original_commit_id: Schema.NullOr(Schema.String),
+  path: Schema.NullOr(Schema.String),
+  user: Schema.NullOr(
+    Schema.Struct({
+      login: Schema.String,
+    }),
+  ),
+})
+
+const RawReviewCommentsSchema = Schema.Array(RawReviewCommentSchema)
+
+const RawCommitSchema = Schema.Struct({
+  commit: Schema.Struct({
+    committer: Schema.Struct({
+      date: Schema.String,
+    }),
+  }),
+})
 
 const CombinedStatusStateSchema = Schema.Union([
   Schema.Literal("pending"),
@@ -86,7 +151,12 @@ const CheckRunsResponseSchema = Schema.Struct({
 })
 
 type RawPullRequest = Schema.Schema.Type<typeof RawPullRequestSchema>
-type CombinedStatusResponse = Schema.Schema.Type<typeof CombinedStatusResponseSchema>
+type RawIssueComment = Schema.Schema.Type<typeof RawIssueCommentSchema>
+type RawReview = Schema.Schema.Type<typeof RawReviewSchema>
+type RawReviewComment = Schema.Schema.Type<typeof RawReviewCommentSchema>
+type CombinedStatusResponse = Schema.Schema.Type<
+  typeof CombinedStatusResponseSchema
+>
 type CheckRunsResponse = Schema.Schema.Type<typeof CheckRunsResponseSchema>
 
 export class GitHubApiError extends Data.TaggedError("GitHubApiError")<{
@@ -113,16 +183,21 @@ export type GitHubInspectionResult =
   | {
       readonly kind: "found-pr"
       readonly associationSource: "linear" | "branch"
+      readonly aiReviewStatus: AiReviewStatus | null
       readonly branchNames: ReadonlyArray<string>
       readonly pullRequest: PullRequest
       readonly headSha: string
+      readonly reviewContext: PullRequestReviewContext
+      readonly reviewRoundCount: number | null
       readonly checkSummary: CheckSummary
     }
 
 const githubApiVersion = "2022-11-28"
 const githubAcceptHeader = "application/vnd.github+json"
 const githubCheckRunsPerPage = 100
+const githubReviewActivityPerPage = 100
 const maxCheckRunPages = 10
+const maxReviewActivityPages = 10
 
 const toPullRequest = ({
   fallbackOwner,
@@ -177,7 +252,10 @@ export const normalizeCheckSummary = ({
       continue
     }
 
-    if (checkRun.conclusion === "success" || checkRun.conclusion === "neutral") {
+    if (
+      checkRun.conclusion === "success" ||
+      checkRun.conclusion === "neutral"
+    ) {
       successfulCount += 1
       continue
     }
@@ -257,24 +335,29 @@ const executeGithubJson = <A>(
   config: GitHubConfig,
   url: string,
   schema: Schema.Schema<A>,
-) : Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient> =>
-  (Effect.gen(function* () {
+): Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient> =>
+  Effect.gen(function* () {
     const httpClient = yield* HttpClient.HttpClient
-    const response = yield* httpClient.execute(
-      HttpClientRequest.get(url).pipe(
-        HttpClientRequest.acceptJson,
-        HttpClientRequest.setHeader("Authorization", `Bearer ${config.token}`),
-        HttpClientRequest.setHeader("Accept", githubAcceptHeader),
-        HttpClientRequest.setHeader("X-GitHub-Api-Version", githubApiVersion),
-      ),
-    ).pipe(
-      Effect.mapError(
-        (error) =>
-          new GitHubApiError({
-            message: `github request failed for ${url}: ${String(error)}`,
-          }),
-      ),
-    )
+    const response = yield* httpClient
+      .execute(
+        HttpClientRequest.get(url).pipe(
+          HttpClientRequest.acceptJson,
+          HttpClientRequest.setHeader(
+            "Authorization",
+            `Bearer ${config.token}`,
+          ),
+          HttpClientRequest.setHeader("Accept", githubAcceptHeader),
+          HttpClientRequest.setHeader("X-GitHub-Api-Version", githubApiVersion),
+        ),
+      )
+      .pipe(
+        Effect.mapError(
+          (error) =>
+            new GitHubApiError({
+              message: `github request failed for ${url}: ${String(error)}`,
+            }),
+        ),
+      )
 
     if (response.status === 404) {
       return null
@@ -306,7 +389,7 @@ const executeGithubJson = <A>(
     )
 
     return payload
-  }) as Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient>)
+  }) as Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient>
 
 const pullRequestUrl = ({
   apiUrl,
@@ -385,6 +468,195 @@ const checkRunsUrl = ({
   return url.toString()
 }
 
+const issueCommentsUrl = ({
+  apiUrl,
+  owner,
+  page = 1,
+  perPage = githubReviewActivityPerPage,
+  repo,
+  pullRequestNumber,
+}: {
+  readonly apiUrl: string
+  readonly owner: string
+  readonly page?: number
+  readonly perPage?: number
+  readonly repo: string
+  readonly pullRequestNumber: number
+}) => {
+  const url = new URL(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${pullRequestNumber}/comments`,
+    apiUrl,
+  )
+  url.searchParams.set("page", String(page))
+  url.searchParams.set("per_page", String(perPage))
+  return url.toString()
+}
+
+const reviewsUrl = ({
+  apiUrl,
+  owner,
+  page = 1,
+  perPage = githubReviewActivityPerPage,
+  repo,
+  pullRequestNumber,
+}: {
+  readonly apiUrl: string
+  readonly owner: string
+  readonly page?: number
+  readonly perPage?: number
+  readonly repo: string
+  readonly pullRequestNumber: number
+}) => {
+  const url = new URL(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullRequestNumber}/reviews`,
+    apiUrl,
+  )
+  url.searchParams.set("page", String(page))
+  url.searchParams.set("per_page", String(perPage))
+  return url.toString()
+}
+
+const reviewCommentsUrl = ({
+  apiUrl,
+  owner,
+  page = 1,
+  perPage = githubReviewActivityPerPage,
+  repo,
+  pullRequestNumber,
+}: {
+  readonly apiUrl: string
+  readonly owner: string
+  readonly page?: number
+  readonly perPage?: number
+  readonly repo: string
+  readonly pullRequestNumber: number
+}) => {
+  const url = new URL(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullRequestNumber}/comments`,
+    apiUrl,
+  )
+  url.searchParams.set("page", String(page))
+  url.searchParams.set("per_page", String(perPage))
+  return url.toString()
+}
+
+const commitUrl = ({
+  apiUrl,
+  owner,
+  repo,
+  sha,
+}: {
+  readonly apiUrl: string
+  readonly owner: string
+  readonly repo: string
+  readonly sha: string
+}) =>
+  new URL(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}`,
+    apiUrl,
+  ).toString()
+
+const toIssueCommentSummary = (
+  comment: RawIssueComment,
+): PullRequestCommentSummary => ({
+  authorLogin: comment.user?.login ?? null,
+  body: comment.body,
+  createdAt: comment.created_at,
+  htmlUrl: comment.html_url,
+  id: String(comment.id),
+})
+
+const toReviewSummary = (review: RawReview): ReviewSummary => ({
+  authorAssociation: review.author_association,
+  authorLogin: review.user?.login ?? null,
+  body: review.body ?? "",
+  commitId: review.commit_id,
+  htmlUrl: review.html_url,
+  id: String(review.id),
+  state: review.state,
+  submittedAt: review.submitted_at,
+})
+
+const toReviewThreadCommentSummary = (
+  comment: RawReviewComment,
+): ReviewThreadSummary["comments"][number] => ({
+  authorLogin: comment.user?.login ?? null,
+  body: comment.body,
+  commitId: comment.commit_id,
+  createdAt: comment.created_at,
+  htmlUrl: comment.html_url,
+  id: String(comment.id),
+  inReplyToId:
+    comment.in_reply_to_id === null ? null : String(comment.in_reply_to_id),
+  originalCommitId: comment.original_commit_id,
+  path: comment.path,
+})
+
+const compareIsoStrings = (left: string, right: string) =>
+  new Date(left).getTime() - new Date(right).getTime()
+
+const maxIsoString = (values: ReadonlyArray<string>) =>
+  values.length === 0
+    ? null
+    : ([...values].sort(compareIsoStrings).at(-1) ?? null)
+
+const buildReviewThreads = (
+  comments: ReadonlyArray<RawReviewComment>,
+): PullRequestReviewContext["reviewThreads"] => {
+  const commentsById = new Map(
+    comments.map((comment) => [String(comment.id), comment] as const),
+  )
+  const grouped = new Map<string, Array<RawReviewComment>>()
+
+  const findRootId = (comment: RawReviewComment) => {
+    let current = comment
+    let nextReplyToId = current.in_reply_to_id
+
+    while (nextReplyToId !== null) {
+      const parent = commentsById.get(String(nextReplyToId))
+      if (parent === undefined) {
+        break
+      }
+
+      current = parent
+      nextReplyToId = current.in_reply_to_id
+    }
+
+    return String(current.id)
+  }
+
+  for (const comment of comments) {
+    const rootId = findRootId(comment)
+    const threadComments = grouped.get(rootId) ?? []
+    threadComments.push(comment)
+    grouped.set(rootId, threadComments)
+  }
+
+  return [...grouped.entries()]
+    .map(([rootId, threadComments]) => {
+      const normalizedComments = threadComments
+        .map(toReviewThreadCommentSummary)
+        .sort((left, right) =>
+          compareIsoStrings(left.createdAt, right.createdAt),
+        )
+      const updatedAt = maxIsoString(
+        normalizedComments.map((comment) => comment.createdAt),
+      )
+
+      return {
+        comments: normalizedComments,
+        id: rootId,
+        isResolved: false,
+        path: normalizedComments[0]?.path ?? null,
+        updatedAt:
+          updatedAt ??
+          normalizedComments[0]?.createdAt ??
+          new Date(0).toISOString(),
+      } satisfies ReviewThreadSummary
+    })
+    .sort((left, right) => compareIsoStrings(left.updatedAt, right.updatedAt))
+}
+
 const fetchPullRequestByNumber = (
   config: GitHubConfig,
   ref: Pick<LinkedPullRequestRef, "owner" | "repo" | "number">,
@@ -413,11 +685,7 @@ const fetchPullRequestByNumber = (
 const listPullRequestsByBranch = (
   config: GitHubConfig,
   branchName: string,
-): Effect.Effect<
-  Array<PullRequest>,
-  GitHubApiError,
-  HttpClient.HttpClient
-> =>
+): Effect.Effect<Array<PullRequest>, GitHubApiError, HttpClient.HttpClient> =>
   executeGithubJson(
     config,
     pullRequestsByBranchUrl({
@@ -442,11 +710,7 @@ const listPullRequestsByBranch = (
 const fetchCheckRuns = (
   config: GitHubConfig,
   pullRequest: PullRequest,
-): Effect.Effect<
-  CheckRunsResponse,
-  GitHubApiError,
-  HttpClient.HttpClient
-> =>
+): Effect.Effect<CheckRunsResponse, GitHubApiError, HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const checkRuns: Array<CheckRunsResponse["check_runs"][number]> = []
     let page = 1
@@ -498,11 +762,7 @@ const fetchCheckRuns = (
 const fetchCheckSummary = (
   config: GitHubConfig,
   pullRequest: PullRequest,
-): Effect.Effect<
-  CheckSummary,
-  GitHubApiError,
-  HttpClient.HttpClient
-> =>
+): Effect.Effect<CheckSummary, GitHubApiError, HttpClient.HttpClient> =>
   Effect.all({
     checkRuns: fetchCheckRuns(config, pullRequest),
     combinedStatus: executeGithubJson(
@@ -532,6 +792,257 @@ const fetchCheckSummary = (
         }),
       )
     }),
+  )
+
+const fetchPaginatedGithubCollection = <A>({
+  config,
+  description,
+  perPage = githubReviewActivityPerPage,
+  schema,
+  urlForPage,
+}: {
+  readonly config: GitHubConfig
+  readonly description: string
+  readonly perPage?: number
+  readonly schema: Schema.Schema<ReadonlyArray<A>>
+  readonly urlForPage: (page: number) => string
+}): Effect.Effect<ReadonlyArray<A>, GitHubApiError, HttpClient.HttpClient> =>
+  Effect.gen(function* () {
+    const items: Array<A> = []
+    let page = 1
+
+    while (true) {
+      if (page > maxReviewActivityPages) {
+        return yield* new GitHubApiError({
+          message: `github ${description} pagination exceeded ${maxReviewActivityPages} pages`,
+        })
+      }
+
+      const response = yield* executeGithubJson(
+        config,
+        urlForPage(page),
+        schema,
+      )
+      const pageItems = response ?? []
+      items.push(...pageItems)
+
+      if (pageItems.length < perPage) {
+        return items
+      }
+
+      page += 1
+    }
+  })
+
+const fetchIssueComments = (config: GitHubConfig, pullRequest: PullRequest) =>
+  fetchPaginatedGithubCollection({
+    config,
+    description: `issue comments for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+    schema: RawIssueCommentsSchema,
+    urlForPage: (page) =>
+      issueCommentsUrl({
+        apiUrl: config.apiUrl,
+        owner: pullRequest.owner,
+        page,
+        repo: pullRequest.repo,
+        pullRequestNumber: pullRequest.number,
+      }),
+  }).pipe(
+    Effect.map((comments) =>
+      comments
+        .map(toIssueCommentSummary)
+        .sort((left, right) =>
+          compareIsoStrings(left.createdAt, right.createdAt),
+        ),
+    ),
+  )
+
+const fetchReviews = (config: GitHubConfig, pullRequest: PullRequest) =>
+  fetchPaginatedGithubCollection({
+    config,
+    description: `reviews for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+    schema: RawReviewsSchema,
+    urlForPage: (page) =>
+      reviewsUrl({
+        apiUrl: config.apiUrl,
+        owner: pullRequest.owner,
+        page,
+        repo: pullRequest.repo,
+        pullRequestNumber: pullRequest.number,
+      }),
+  }).pipe(
+    Effect.map((reviews) =>
+      reviews
+        .map(toReviewSummary)
+        .sort((left, right) =>
+          compareIsoStrings(
+            left.submittedAt ?? new Date(0).toISOString(),
+            right.submittedAt ?? new Date(0).toISOString(),
+          ),
+        ),
+    ),
+  )
+
+const fetchReviewThreads = (config: GitHubConfig, pullRequest: PullRequest) =>
+  fetchPaginatedGithubCollection({
+    config,
+    description: `review comments for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+    schema: RawReviewCommentsSchema,
+    urlForPage: (page) =>
+      reviewCommentsUrl({
+        apiUrl: config.apiUrl,
+        owner: pullRequest.owner,
+        page,
+        repo: pullRequest.repo,
+        pullRequestNumber: pullRequest.number,
+      }),
+  }).pipe(Effect.map(buildReviewThreads))
+
+const fetchHeadCommitCommittedAt = (
+  config: GitHubConfig,
+  pullRequest: PullRequest,
+) =>
+  executeGithubJson(
+    config,
+    commitUrl({
+      apiUrl: config.apiUrl,
+      owner: pullRequest.owner,
+      repo: pullRequest.repo,
+      sha: pullRequest.headSha,
+    }),
+    RawCommitSchema,
+  ).pipe(
+    Effect.flatMap((commit) =>
+      commit === null
+        ? Effect.fail(
+            new GitHubApiError({
+              message: `missing github commit metadata for ${pullRequest.owner}/${pullRequest.repo}@${pullRequest.headSha}`,
+            }),
+          )
+        : Effect.succeed(commit.commit.committer.date),
+    ),
+  )
+
+const timestampAfter = (timestamp: string, baseline: string) =>
+  Number.isFinite(new Date(timestamp).getTime()) &&
+  Number.isFinite(new Date(baseline).getTime()) &&
+  new Date(timestamp).getTime() > new Date(baseline).getTime()
+
+export const deriveAiReviewStatus = ({
+  currentHeadSha,
+  headCommitCommittedAt,
+  issueComments,
+  previousStatus,
+  reviewThreads,
+  reviews,
+}: {
+  readonly currentHeadSha: string
+  readonly headCommitCommittedAt: string | null
+  readonly issueComments: ReadonlyArray<PullRequestCommentSummary>
+  readonly previousStatus?: AiReviewStatus | null | undefined
+  readonly reviewThreads: ReadonlyArray<ReviewThreadSummary>
+  readonly reviews: ReadonlyArray<ReviewSummary>
+}): AiReviewStatus => {
+  const sameHead = previousStatus?.headSha === currentHeadSha
+  const activityBaseline =
+    sameHead && previousStatus?.waitingSince
+      ? previousStatus.waitingSince
+      : headCommitCommittedAt
+
+  if (activityBaseline === null) {
+    return {
+      headSha: currentHeadSha,
+      lastObservedReviewActivityAt: null,
+      status: "ambiguous",
+      waitingSince: null,
+    }
+  }
+
+  const pendingIssueComments = issueComments.filter((comment) =>
+    timestampAfter(
+      comment.createdAt,
+      headCommitCommittedAt ?? activityBaseline,
+    ),
+  )
+
+  const reviewActivityTimestamps = [
+    ...reviews
+      .filter(
+        (review) =>
+          review.commitId === currentHeadSha &&
+          review.submittedAt !== null &&
+          timestampAfter(review.submittedAt, activityBaseline),
+      )
+      .map((review) => review.submittedAt as string),
+    ...reviewThreads.flatMap((thread) =>
+      thread.comments
+        .filter(
+          (comment) =>
+            (comment.commitId === currentHeadSha ||
+              comment.originalCommitId === currentHeadSha) &&
+            timestampAfter(comment.createdAt, activityBaseline),
+        )
+        .map((comment) => comment.createdAt),
+    ),
+  ]
+  const lastObservedReviewActivityAt = maxIsoString(reviewActivityTimestamps)
+
+  if (lastObservedReviewActivityAt !== null) {
+    return {
+      headSha: currentHeadSha,
+      lastObservedReviewActivityAt,
+      status: "completed",
+      waitingSince:
+        previousStatus?.waitingSince ??
+        pendingIssueComments.at(-1)?.createdAt ??
+        activityBaseline,
+    }
+  }
+
+  if (sameHead && previousStatus?.waitingSince) {
+    return {
+      headSha: currentHeadSha,
+      lastObservedReviewActivityAt: null,
+      status: "pending",
+      waitingSince: previousStatus.waitingSince,
+    }
+  }
+
+  const lastPendingCommentAt = pendingIssueComments.at(-1)?.createdAt ?? null
+  if (lastPendingCommentAt !== null) {
+    return {
+      headSha: currentHeadSha,
+      lastObservedReviewActivityAt: null,
+      status: "pending",
+      waitingSince: lastPendingCommentAt,
+    }
+  }
+
+  return {
+    headSha: currentHeadSha,
+    lastObservedReviewActivityAt: null,
+    status: "not_requested",
+    waitingSince: null,
+  }
+}
+
+const fetchReviewContext = (config: GitHubConfig, pullRequest: PullRequest) =>
+  Effect.all({
+    headCommitCommittedAt: fetchHeadCommitCommittedAt(config, pullRequest),
+    issueComments: fetchIssueComments(config, pullRequest),
+    reviewThreads: fetchReviewThreads(config, pullRequest),
+    reviews: fetchReviews(config, pullRequest),
+  }).pipe(
+    Effect.map(
+      ({ headCommitCommittedAt, issueComments, reviewThreads, reviews }) => ({
+        headCommitCommittedAt,
+        reviewContext: {
+          issueComments,
+          reviewThreads,
+          reviews,
+        } satisfies PullRequestReviewContext,
+      }),
+    ),
   )
 
 const buildFallbackBranchNames = ({
@@ -587,18 +1098,38 @@ const buildFallbackBranchNames = ({
 }
 
 export const inspectIssueGitHubState = ({
+  currentAiReviewStatus,
+  currentHeadSha,
+  currentReviewRoundCount,
   config,
   fetchCheckSummary: fetchCheckSummaryImpl = fetchCheckSummary,
-  fetchPullRequestByNumber: fetchPullRequestByNumberImpl = fetchPullRequestByNumber,
+  fetchReviewContext: fetchReviewContextImpl = fetchReviewContext,
+  fetchPullRequestByNumber:
+    fetchPullRequestByNumberImpl = fetchPullRequestByNumber,
   issue,
-  listPullRequestsByBranch: listPullRequestsByBranchImpl = listPullRequestsByBranch,
+  listPullRequestsByBranch:
+    listPullRequestsByBranchImpl = listPullRequestsByBranch,
   trackedBranchName,
 }: {
+  readonly currentAiReviewStatus?: AiReviewStatus | null | undefined
+  readonly currentHeadSha?: string | null | undefined
+  readonly currentReviewRoundCount?: number | null | undefined
   readonly config: GitHubConfig
   readonly fetchCheckSummary?: (
     config: GitHubConfig,
     pullRequest: PullRequest,
   ) => Effect.Effect<CheckSummary, GitHubApiError, HttpClient.HttpClient>
+  readonly fetchReviewContext?: (
+    config: GitHubConfig,
+    pullRequest: PullRequest,
+  ) => Effect.Effect<
+    {
+      readonly headCommitCommittedAt: string
+      readonly reviewContext: PullRequestReviewContext
+    },
+    GitHubApiError,
+    HttpClient.HttpClient
+  >
   readonly fetchPullRequestByNumber?: (
     config: GitHubConfig,
     ref: Pick<LinkedPullRequestRef, "owner" | "repo" | "number">,
@@ -619,6 +1150,60 @@ export const inspectIssueGitHubState = ({
   HttpClient.HttpClient
 > =>
   Effect.gen(function* () {
+    const inspectFoundPullRequest = ({
+      associationSource,
+      branchNames,
+      pullRequest,
+    }: {
+      readonly associationSource: "linear" | "branch"
+      readonly branchNames: ReadonlyArray<string>
+      readonly pullRequest: PullRequest
+    }) =>
+      Effect.gen(function* () {
+        const checkSummary = yield* fetchCheckSummaryImpl(config, pullRequest)
+
+        if (checkSummary.status !== "passed" || pullRequest.isDraft) {
+          return {
+            kind: "found-pr",
+            associationSource,
+            aiReviewStatus: null,
+            branchNames,
+            checkSummary,
+            headSha: pullRequest.headSha,
+            pullRequest,
+            reviewContext: emptyReviewContext,
+            reviewRoundCount: null,
+          } satisfies GitHubInspectionResult
+        }
+
+        const { headCommitCommittedAt, reviewContext } =
+          yield* fetchReviewContextImpl(config, pullRequest)
+        const aiReviewStatus = deriveAiReviewStatus({
+          currentHeadSha: pullRequest.headSha,
+          headCommitCommittedAt,
+          issueComments: reviewContext.issueComments,
+          previousStatus: currentAiReviewStatus,
+          reviewThreads: reviewContext.reviewThreads,
+          reviews: reviewContext.reviews,
+        })
+
+        return {
+          kind: "found-pr",
+          associationSource,
+          aiReviewStatus,
+          branchNames,
+          checkSummary,
+          headSha: pullRequest.headSha,
+          pullRequest,
+          reviewContext,
+          reviewRoundCount: nextReviewRoundCount({
+            currentHeadSha: currentHeadSha ?? null,
+            nextHeadSha: pullRequest.headSha,
+            previousReviewRoundCount: currentReviewRoundCount ?? null,
+          }),
+        } satisfies GitHubInspectionResult
+      })
+
     if (issue.linkedPullRequests.length > 1) {
       return {
         kind: "ambiguous",
@@ -657,16 +1242,11 @@ export const inspectIssueGitHubState = ({
         } satisfies GitHubInspectionResult
       }
 
-      const checkSummary = yield* fetchCheckSummaryImpl(config, pullRequest)
-
-      return {
-        kind: "found-pr",
+      return yield* inspectFoundPullRequest({
         associationSource: "linear",
         branchNames: [pullRequest.headRefName],
         pullRequest,
-        headSha: pullRequest.headSha,
-        checkSummary,
-      } satisfies GitHubInspectionResult
+      })
     }
 
     const branchNames = buildFallbackBranchNames({
@@ -701,16 +1281,11 @@ export const inspectIssueGitHubState = ({
         } satisfies GitHubInspectionResult
       }
 
-      const checkSummary = yield* fetchCheckSummaryImpl(config, pullRequest)
-
-      return {
-        kind: "found-pr",
+      return yield* inspectFoundPullRequest({
         associationSource: "branch",
         branchNames,
         pullRequest,
-        headSha: pullRequest.headSha,
-        checkSummary,
-      } satisfies GitHubInspectionResult
+      })
     }
 
     return {

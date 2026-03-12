@@ -40,6 +40,10 @@ type PromptSessionResponse = {
         readonly info?: {
           readonly error?: unknown
         }
+        readonly parts?: ReadonlyArray<{
+          readonly text?: string
+          readonly type?: string
+        }>
       }
     | undefined
 }
@@ -122,17 +126,14 @@ const isRetryableMessageError = (error: unknown) => {
   const name = getString(getProperty(error, "name"))
   if (name === "APIError") {
     return (
-      getBoolean(getProperty(getProperty(error, "data"), "isRetryable")) ??
-      true
+      getBoolean(getProperty(getProperty(error, "data"), "isRetryable")) ?? true
     )
   }
 
   return name === "MessageAbortedError" || name === "UnknownError"
 }
 
-const buildServerConfig = (
-  config: OpencodeConfig,
-): OpencodeServerConfig => ({
+const buildServerConfig = (config: OpencodeConfig): OpencodeServerConfig => ({
   agent: {
     build: {
       maxSteps: config.agent.maxTurns,
@@ -181,7 +182,20 @@ const protocolFailure = (message: string) =>
     retryable: false,
   })
 
-export const runOpencodeAgent = ({
+const extractAssistantText = (response: PromptSessionResponse) => {
+  const parts = response.data?.parts
+  if (!parts || parts.length === 0) {
+    return ""
+  }
+
+  return parts
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text?.trim() ?? "")
+    .filter((part) => part.length > 0)
+    .join("\n")
+}
+
+const runOpencodePrompt = ({
   config,
   cwd,
   prompt,
@@ -288,6 +302,34 @@ export const runOpencodeAgent = ({
                 `opencode prompt failed: ${formatMessageError(messageError)}`,
               )
             }
+
+            return extractAssistantText(promptResponse)
           }),
         cleanupServer,
       )
+
+export const runOpencodeAgent = (params: {
+  readonly config: OpencodeConfig
+  readonly cwd: string
+  readonly prompt: string
+  readonly createClient?: (options: {
+    readonly baseUrl: string
+    readonly directory: string
+  }) => OpencodeClientLike
+  readonly createServer?: (
+    options: ServerOptions,
+  ) => Promise<OpencodeServerLike>
+}) => runOpencodePrompt(params).pipe(Effect.asVoid)
+
+export const runOpencodeAgentText = (params: {
+  readonly config: OpencodeConfig
+  readonly cwd: string
+  readonly prompt: string
+  readonly createClient?: (options: {
+    readonly baseUrl: string
+    readonly directory: string
+  }) => OpencodeClientLike
+  readonly createServer?: (
+    options: ServerOptions,
+  ) => Promise<OpencodeServerLike>
+}) => runOpencodePrompt(params)

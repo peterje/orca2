@@ -217,6 +217,23 @@ export const ClaimedIssueSchema = Schema.Struct({
 
 export type ClaimedIssue = Schema.Schema.Type<typeof ClaimedIssueSchema>
 
+export const ManualStateEntrySchema = Schema.Struct({
+  branchName: Schema.NullOr(Schema.String),
+  issueId: Schema.String,
+  issueIdentifier: Schema.String,
+  note: Schema.String,
+  updatedAt: Schema.String,
+  worktreePath: Schema.NullOr(Schema.String),
+})
+
+export type ManualStateEntry = Schema.Schema.Type<typeof ManualStateEntrySchema>
+
+export const ManualStateFileSchema = Schema.Struct({
+  blockedIssues: Schema.Array(ManualStateEntrySchema),
+})
+
+export type ManualStateFile = Schema.Schema.Type<typeof ManualStateFileSchema>
+
 export const RuntimeSnapshotSchema = Schema.Struct({
   updatedAt: Schema.String,
   activeIssues: Schema.Array(NormalizedIssueSchema),

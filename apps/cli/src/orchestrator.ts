@@ -1,4 +1,5 @@
 import { Cause, Duration, Effect, Ref } from "effect"
+import { HttpClient } from "effect/unstable/http"
 import {
   applyAiReviewDecision,
   emptyReviewContext,
@@ -10,6 +11,7 @@ import { AgentRunnerError } from "./agent-runner"
 import type {
   AiReviewStatus,
   CheckSummary,
+  ManualStateFile,
   NormalizedIssue,
   OrcaIssueState,
   PullRequest,
@@ -18,14 +20,26 @@ import type {
   SelectedRunnableIssue,
 } from "./domain"
 import { formatErrorMessage } from "./error-format"
-import { WorktreeError } from "./git-worktree"
+import {
+  type IssueWorktreeInspection,
+  inspectIssueWorktree,
+  removeIssueWorktree,
+  WorktreeError,
+} from "./git-worktree"
 import type { GitHubInspectionResult } from "./github"
 import { inspectIssueGitHubState } from "./github"
 import type { ImplementationAttemptOutcome } from "./implementation-attempt"
 import { runImplementationAttempt } from "./implementation-attempt"
-import { fetchActiveIssues } from "./linear"
+import { fetchActiveIssues, fetchTerminalIssues } from "./linear"
 import type { AppLogLevel } from "./logging"
 import { log } from "./logging"
+import {
+  buildManualStateFile,
+  findManualStateEntry,
+  loadManualState,
+  resolveManualStatePath,
+  saveManualState,
+} from "./manual-state"
 import type { OrcaConfig } from "./orca-config"
 
 interface IssueExecutionState {
@@ -381,15 +395,21 @@ const statesThatSkipGitHubReconciliation = new Set<OrcaIssueState>([
   "RetryQueued",
 ])
 
-const reconcileIssuesWithGitHub = ({
+const reconcileIssuesWithGitHub = <Requirements = HttpClient.HttpClient>({
   config,
   humanReviewConfig,
+  inspectGitHubState = inspectIssueGitHubState as (
+    params: Parameters<typeof inspectIssueGitHubState>[0],
+  ) => Effect.Effect<GitHubInspectionResult, unknown, Requirements>,
   issues,
   issueStates,
   summonComment,
 }: {
   readonly config: OrcaConfig["github"]
   readonly humanReviewConfig: OrcaConfig["humanReview"]
+  readonly inspectGitHubState?: (
+    params: Parameters<typeof inspectIssueGitHubState>[0],
+  ) => Effect.Effect<GitHubInspectionResult, unknown, Requirements>
   readonly issues: ReadonlyArray<NormalizedIssue>
   readonly issueStates: IssueStateMap
   readonly summonComment: string
@@ -407,7 +427,7 @@ const reconcileIssuesWithGitHub = ({
         continue
       }
 
-      currentIssueStates = yield* inspectIssueGitHubState({
+      currentIssueStates = yield* inspectGitHubState({
         config,
         currentAiReviewStatus: currentIssueState?.aiReviewStatus,
         currentHeadSha: currentIssueState?.currentHeadSha,
@@ -437,6 +457,123 @@ const reconcileIssuesWithGitHub = ({
     }
 
     return currentIssueStates
+  })
+
+export const recoverIssueStatesFromLocalState = <
+  GitHubRequirements = HttpClient.HttpClient,
+  WorktreeRequirements = never,
+>({
+  config,
+  humanReviewConfig,
+  inspectGitHubState = inspectIssueGitHubState as (
+    params: Parameters<typeof inspectIssueGitHubState>[0],
+  ) => Effect.Effect<GitHubInspectionResult, unknown, GitHubRequirements>,
+  inspectWorktree = inspectIssueWorktree as (
+    params: Parameters<typeof inspectIssueWorktree>[0],
+  ) => Effect.Effect<IssueWorktreeInspection, unknown, WorktreeRequirements>,
+  issues,
+  manualState,
+  summonComment,
+}: {
+  readonly config: Pick<OrcaConfig, "github" | "worktree">
+  readonly humanReviewConfig: OrcaConfig["humanReview"]
+  readonly inspectGitHubState?: (
+    params: Parameters<typeof inspectIssueGitHubState>[0],
+  ) => Effect.Effect<GitHubInspectionResult, unknown, GitHubRequirements>
+  readonly inspectWorktree?: (
+    params: Parameters<typeof inspectIssueWorktree>[0],
+  ) => Effect.Effect<IssueWorktreeInspection, unknown, WorktreeRequirements>
+  readonly issues: ReadonlyArray<NormalizedIssue>
+  readonly manualState: {
+    readonly blockedIssues: ReadonlyArray<{
+      readonly branchName: string | null
+      readonly issueId: string
+      readonly issueIdentifier: string
+      readonly note: string
+      readonly updatedAt: string
+      readonly worktreePath: string | null
+    }>
+  }
+  readonly summonComment: string
+}) =>
+  Effect.gen(function* () {
+    let recoveredIssueStates: IssueStateMap = new Map()
+
+    for (const issue of issues) {
+      const manualEntry = findManualStateEntry({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        manualState,
+      })
+      if (manualEntry !== null) {
+        recoveredIssueStates = updateIssueState(recoveredIssueStates, issue, {
+          aiReviewRoundCount: null,
+          aiReviewStatus: null,
+          branchName: manualEntry.branchName,
+          checkSummary: null,
+          currentHeadSha: null,
+          currentPullRequest: null,
+          lastError: manualEntry.note,
+          reviewContext: emptyReviewContext,
+          retryCount: 0,
+          retryDueAt: null,
+          state: "ManualIntervention",
+          worktreePath: manualEntry.worktreePath,
+        })
+        continue
+      }
+
+      const worktreeInspection = yield* inspectWorktree({
+        config,
+        issue,
+      }).pipe(
+        Effect.catch((error: unknown) =>
+          Effect.succeed({
+            branchName: null,
+            kind: "manual-intervention" as const,
+            message: formatErrorMessage(error),
+            path: null,
+          }),
+        ),
+      )
+
+      if (worktreeInspection.kind === "ready") {
+        recoveredIssueStates = updateIssueState(recoveredIssueStates, issue, {
+          aiReviewRoundCount: null,
+          aiReviewStatus: null,
+          branchName: worktreeInspection.branchName,
+          checkSummary: null,
+          currentHeadSha: null,
+          currentPullRequest: null,
+          lastError: null,
+          reviewContext: emptyReviewContext,
+          retryCount: 0,
+          retryDueAt: null,
+          state: "WaitingForPr",
+          worktreePath: worktreeInspection.path,
+        })
+        continue
+      }
+
+      if (worktreeInspection.kind === "manual-intervention") {
+        recoveredIssueStates = applyManualInterventionState({
+          branchName: worktreeInspection.branchName,
+          issue,
+          issueStates: recoveredIssueStates,
+          message: worktreeInspection.message,
+          worktreePath: worktreeInspection.path,
+        })
+      }
+    }
+
+    return yield* reconcileIssuesWithGitHub({
+      config: config.github,
+      humanReviewConfig,
+      inspectGitHubState,
+      issues,
+      issueStates: recoveredIssueStates,
+      summonComment,
+    })
   })
 
 export const applyImplementationOutcome = ({
@@ -539,6 +676,7 @@ export const runOrchestrator = ({
   readonly logLevel: AppLogLevel
 }) =>
   Effect.gen(function* () {
+    const manualStatePath = resolveManualStatePath(configPath)
     const activeIssuesRef = yield* Ref.make<RuntimeSnapshot["activeIssues"]>([])
     const issueStatesRef = yield* Ref.make<IssueStateMap>(new Map())
     const runningIssueIdRef = yield* Ref.make<string | null>(null)
@@ -549,6 +687,21 @@ export const runOrchestrator = ({
       runnableIssue: null,
     })
 
+    const persistManualStateSnapshot = (snapshot: RuntimeSnapshot) =>
+      saveManualState({
+        file: buildManualStateFile({
+          snapshot,
+        }),
+        manualStatePath,
+      }).pipe(
+        Effect.catch((error: unknown) =>
+          log(logLevel, "Error", "orca.manual-state.save.failed", {
+            message: formatErrorMessage(error),
+            path: manualStatePath,
+          }),
+        ),
+      )
+
     const refreshSnapshot = Effect.gen(function* () {
       const activeIssues = yield* Ref.get(activeIssuesRef)
       const issueStates = yield* Ref.get(issueStatesRef)
@@ -556,9 +709,37 @@ export const runOrchestrator = ({
 
       yield* Ref.set(snapshotRef, snapshot)
       yield* logSnapshot(logLevel, snapshot)
+      yield* persistManualStateSnapshot(snapshot)
 
       return snapshot
     })
+
+    const cleanupTerminalIssueWorktrees = (
+      terminalIssues: ReadonlyArray<NormalizedIssue>,
+    ) =>
+      Effect.forEach(terminalIssues, (issue) =>
+        removeIssueWorktree({
+          config,
+          issue,
+        }).pipe(
+          Effect.flatMap((removed) =>
+            removed
+              ? log(logLevel, "Info", "orca.worktree.cleaned", {
+                  issue_id: issue.id,
+                  issue_identifier: issue.identifier,
+                  worktree_path: null,
+                })
+              : Effect.void,
+          ),
+          Effect.catch((error: unknown) =>
+            log(logLevel, "Warn", "orca.worktree.cleanup.failed", {
+              issue_id: issue.id,
+              issue_identifier: issue.identifier,
+              message: formatErrorMessage(error),
+            }),
+          ),
+        ),
+      ).pipe(Effect.asVoid)
 
     const markRetryQueued = (issue: NormalizedIssue, error: AgentRunnerError) =>
       Effect.gen(function* () {
@@ -971,59 +1152,90 @@ export const runOrchestrator = ({
       linear_project_slug: config.linear.projectSlug,
     })
 
-    const pollOnce = fetchActiveIssues(config.linear).pipe(
-      Effect.flatMap((issues) =>
-        Effect.gen(function* () {
-          const reconciledIssueStates = reconcileIssueStates(
-            issues,
-            yield* Ref.get(issueStatesRef),
-          )
-          const githubReconciledIssueStates = yield* reconcileIssuesWithGitHub({
-            config: config.github,
-            humanReviewConfig: config.humanReview,
-            issues: issues.filter(
-              (issue) => issue.normalizedState !== "terminal",
+    const pollOnce = ({
+      recoverManualState = null,
+    }: {
+      readonly recoverManualState?: ManualStateFile | null
+    } = {}) =>
+      Effect.all({
+        activeIssues: fetchActiveIssues(config.linear),
+        terminalIssues: fetchTerminalIssues(config.linear),
+      }).pipe(
+        Effect.flatMap(({ activeIssues, terminalIssues }) =>
+          cleanupTerminalIssueWorktrees(terminalIssues).pipe(
+            Effect.andThen(
+              Effect.gen(function* () {
+                const reconciledIssueStates =
+                  recoverManualState === null
+                    ? reconcileIssueStates(
+                        activeIssues,
+                        yield* Ref.get(issueStatesRef),
+                      )
+                    : yield* recoverIssueStatesFromLocalState({
+                        config,
+                        humanReviewConfig: config.humanReview,
+                        issues: activeIssues.filter(
+                          (issue) => issue.normalizedState !== "terminal",
+                        ),
+                        manualState: recoverManualState,
+                        summonComment: config.greptile.summonComment,
+                      })
+                const githubReconciledIssueStates =
+                  recoverManualState === null
+                    ? yield* reconcileIssuesWithGitHub({
+                        config: config.github,
+                        humanReviewConfig: config.humanReview,
+                        issues: activeIssues.filter(
+                          (issue) => issue.normalizedState !== "terminal",
+                        ),
+                        issueStates: reconciledIssueStates,
+                        summonComment: config.greptile.summonComment,
+                      })
+                    : reconciledIssueStates
+
+                yield* Ref.set(activeIssuesRef, activeIssues)
+                yield* Ref.set(issueStatesRef, githubReconciledIssueStates)
+
+                const snapshot = yield* refreshSnapshot
+                const runningIssueId = yield* Ref.get(runningIssueIdRef)
+
+                if (runningIssueId !== null) {
+                  return snapshot
+                }
+
+                const runnableIssue = snapshot.runnableIssue
+                if (runnableIssue === null) {
+                  return snapshot
+                }
+
+                const selectedIssue = findIssue(activeIssues, runnableIssue.id)
+                if (selectedIssue === undefined) {
+                  return snapshot
+                }
+
+                yield* dispatchIssue(selectedIssue)
+                return snapshot
+              }),
             ),
-            issueStates: reconciledIssueStates,
-            summonComment: config.greptile.summonComment,
-          })
+          ),
+        ),
+        Effect.catchCause((cause: Cause.Cause<unknown>) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : log(logLevel, "Error", "orca.linear.poll.failed", {
+                message: formatErrorMessage(Cause.squash(cause)),
+              }),
+        ),
+      )
 
-          yield* Ref.set(activeIssuesRef, issues)
-          yield* Ref.set(issueStatesRef, githubReconciledIssueStates)
-
-          const snapshot = yield* refreshSnapshot
-          const runningIssueId = yield* Ref.get(runningIssueIdRef)
-
-          if (runningIssueId !== null) {
-            return snapshot
-          }
-
-          const runnableIssue = snapshot.runnableIssue
-          if (runnableIssue === null) {
-            return snapshot
-          }
-
-          const selectedIssue = findIssue(issues, runnableIssue.id)
-          if (selectedIssue === undefined) {
-            return snapshot
-          }
-
-          yield* dispatchIssue(selectedIssue)
-          return snapshot
-        }),
-      ),
-      Effect.catchCause((cause: Cause.Cause<unknown>) =>
-        Cause.hasInterrupts(cause)
-          ? Effect.failCause(cause)
-          : log(logLevel, "Error", "orca.linear.poll.failed", {
-              message: formatErrorMessage(Cause.squash(cause)),
-            }),
-      ),
-    )
+    const loadedManualState = yield* loadManualState(manualStatePath)
+    yield* pollOnce({
+      recoverManualState: loadedManualState,
+    })
 
     while (true) {
       const pollStartedAt = Date.now()
-      yield* pollOnce
+      yield* pollOnce()
 
       const elapsedMs = Date.now() - pollStartedAt
       const remainingDelayMs = Math.max(

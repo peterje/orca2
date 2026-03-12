@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test"
+import { Effect } from "effect"
 import { emptyReviewContext } from "./ai-review"
 import {
   applyImplementationOutcome,
   applyManualInterventionState,
+  recoverIssueStatesFromLocalState,
   resolveRetryPlan,
   updateIssueStateForGitHubInspection,
 } from "./orchestrator"
@@ -584,6 +586,186 @@ describe("orchestrator", () => {
       issueState({
         lastError: "multiple pull requests matched branch pet-47 for PET-47",
         state: "ManualIntervention",
+      }),
+    )
+  })
+
+  it("recovers waiting for pr from a clean local worktree", async () => {
+    const recovered = await Effect.runPromise(
+      recoverIssueStatesFromLocalState({
+        config: {
+          github: {
+            apiUrl: "https://api.github.com",
+            owner: "peterje",
+            repo: "orca2",
+            token: "github-token",
+          },
+          worktree: {
+            repoRoot: "/repo",
+            root: "/repo/.orca/worktrees",
+          },
+        } as never,
+        humanReviewConfig: {
+          requireApproval: true,
+          requireNoUnresolvedThreads: true,
+        },
+        inspectGitHubState: () =>
+          Effect.succeed({
+            branchNames: ["pet-47"],
+            kind: "missing-pr" as const,
+          }),
+        inspectWorktree: () =>
+          Effect.succeed({
+            branchName: "pet-47",
+            kind: "ready" as const,
+            path: "/repo/.orca/worktrees/pet-47",
+          }),
+        issues: [issue],
+        manualState: {
+          blockedIssues: [],
+        },
+        summonComment: "@greptileai",
+      }),
+    )
+
+    expect(recovered.get(issue.id)).toEqual(
+      issueState({
+        branchName: "pet-47",
+        state: "WaitingForPr",
+        worktreePath: "/repo/.orca/worktrees/pet-47",
+      }),
+    )
+  })
+
+  it("restores manual intervention from the manual state file", async () => {
+    const recovered = await Effect.runPromise(
+      recoverIssueStatesFromLocalState({
+        config: {
+          github: {
+            apiUrl: "https://api.github.com",
+            owner: "peterje",
+            repo: "orca2",
+            token: "github-token",
+          },
+          worktree: {
+            repoRoot: "/repo",
+            root: "/repo/.orca/worktrees",
+          },
+        } as never,
+        humanReviewConfig: {
+          requireApproval: true,
+          requireNoUnresolvedThreads: true,
+        },
+        inspectGitHubState: () => {
+          throw new Error(
+            "manual intervention issues should skip github recovery",
+          )
+        },
+        inspectWorktree: () => {
+          throw new Error(
+            "manual intervention issues should skip worktree recovery",
+          )
+        },
+        issues: [issue],
+        manualState: {
+          blockedIssues: [
+            {
+              branchName: "pet-47",
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              note: "broken worktree state",
+              updatedAt: "2026-03-11T12:00:00.000Z",
+              worktreePath: "/repo/.orca/worktrees/pet-47",
+            },
+          ],
+        },
+        summonComment: "@greptileai",
+      }),
+    )
+
+    expect(recovered.get(issue.id)).toEqual(
+      issueState({
+        branchName: "pet-47",
+        lastError: "broken worktree state",
+        state: "ManualIntervention",
+        worktreePath: "/repo/.orca/worktrees/pet-47",
+      }),
+    )
+  })
+
+  it("reconstructs waiting for ai review from github without rerunning implementation", async () => {
+    const recovered = await Effect.runPromise(
+      recoverIssueStatesFromLocalState({
+        config: {
+          github: {
+            apiUrl: "https://api.github.com",
+            owner: "peterje",
+            repo: "orca2",
+            token: "github-token",
+          },
+          worktree: {
+            repoRoot: "/repo",
+            root: "/repo/.orca/worktrees",
+          },
+        } as never,
+        humanReviewConfig: {
+          requireApproval: true,
+          requireNoUnresolvedThreads: true,
+        },
+        inspectGitHubState: () =>
+          Effect.succeed(
+            foundPullRequestInspection({
+              aiReviewStatus: {
+                headSha: "def456",
+                lastObservedReviewActivityAt: null,
+                status: "pending",
+                waitingSince: "2026-03-11T12:04:00.000Z",
+              },
+              headSha: "def456",
+              pullRequest: {
+                ...pullRequest,
+                headSha: "def456",
+              },
+              reviewRoundCount: 2,
+            }),
+          ),
+        inspectWorktree: () =>
+          Effect.succeed({
+            branchName: "pet-47",
+            kind: "missing" as const,
+            path: "/repo/.orca/worktrees/pet-47",
+          }),
+        issues: [issue],
+        manualState: {
+          blockedIssues: [],
+        },
+        summonComment: "@greptileai",
+      }),
+    )
+
+    expect(recovered.get(issue.id)).toEqual(
+      issueState({
+        aiReviewRoundCount: 2,
+        aiReviewStatus: {
+          headSha: "def456",
+          lastObservedReviewActivityAt: null,
+          status: "pending",
+          waitingSince: "2026-03-11T12:04:00.000Z",
+        },
+        branchName: "pet-47",
+        checkSummary: {
+          failedCount: 0,
+          pendingCount: 0,
+          status: "passed",
+          successfulCount: 3,
+          totalCount: 3,
+        },
+        currentHeadSha: "def456",
+        currentPullRequest: {
+          ...pullRequest,
+          headSha: "def456",
+        },
+        state: "WaitingForAiReview",
       }),
     )
   })

@@ -77,7 +77,7 @@ type RawIssue = Schema.Schema.Type<typeof RawIssueSchema>
 type RawAttachment = RawIssue["attachments"]["nodes"][number]
 type RawRelatedIssue = Schema.Schema.Type<typeof RelatedIssueSchema>
 type RawIssueRelation = Schema.Schema.Type<typeof IssueRelationSchema>
-type ActiveIssuesPage = NonNullable<ActiveIssuesResponse["data"]>["issues"]
+type IssuesPage = NonNullable<ActiveIssuesResponse["data"]>["issues"]
 
 const PageInfoSchema = Schema.Struct({
   hasNextPage: Schema.Boolean,
@@ -111,14 +111,14 @@ export class LinearApiError extends Data.TaggedError("LinearApiError")<{
 export const decodeActiveIssuesResponse = (input: unknown) =>
   Schema.decodeUnknownEffect(ActiveIssuesResponseSchema)(input)
 
-const activeIssuesQuery = `
-  query ActiveIssues($projectSlug: String!, $activeStates: [String!]!, $after: String) {
+const issuesByStateNamesQuery = `
+  query IssuesByStateNames($projectSlug: String!, $stateNames: [String!]!, $after: String) {
     issues(
       first: 100
       after: $after
       filter: {
         project: { slug: { eq: $projectSlug } }
-        state: { name: { in: $activeStates } }
+        state: { name: { in: $stateNames } }
       }
     ) {
       pageInfo {
@@ -398,19 +398,21 @@ export const normalizeActiveIssues = (
   })
 }
 
-const fetchActiveIssuesPage = ({
+const fetchIssuesPage = ({
   config,
   after,
+  stateNames,
 }: {
   readonly config: LinearConfig
   readonly after: string | null
+  readonly stateNames: ReadonlyArray<string>
 }) =>
   Effect.gen(function* () {
     const body = yield* HttpBody.json({
-      query: activeIssuesQuery,
+      query: issuesByStateNamesQuery,
       variables: {
         projectSlug: config.projectSlug,
-        activeStates: [...config.activeStates],
+        stateNames: [...stateNames],
         after,
       },
     })
@@ -438,7 +440,7 @@ const fetchActiveIssuesPage = ({
 
     if (payload.data === null) {
       return yield* new LinearApiError({
-        message: "linear returned no data for the active issues query",
+        message: "linear returned no data for the issues query",
       })
     }
 
@@ -455,8 +457,18 @@ export interface LinearConfig {
 
 export const maxActiveIssuePages = 50
 
-export const fetchActiveIssues = (config: LinearConfig) =>
+export const fetchIssuesByStateNames = ({
+  config,
+  stateNames,
+}: {
+  readonly config: LinearConfig
+  readonly stateNames: ReadonlyArray<string>
+}) =>
   Effect.gen(function* () {
+    if (stateNames.length === 0) {
+      return [] as Array<NormalizedIssue>
+    }
+
     const nodes: Array<RawIssue> = []
     let after: string | null = null
     let pageCount = 0
@@ -470,9 +482,10 @@ export const fetchActiveIssues = (config: LinearConfig) =>
         })
       }
 
-      const page: ActiveIssuesPage = yield* fetchActiveIssuesPage({
+      const page: IssuesPage = yield* fetchIssuesPage({
         config,
         after,
+        stateNames,
       })
       nodes.push(...page.nodes)
 
@@ -504,4 +517,16 @@ export const fetchActiveIssues = (config: LinearConfig) =>
       },
       config.terminalStates,
     )
+  })
+
+export const fetchActiveIssues = (config: LinearConfig) =>
+  fetchIssuesByStateNames({
+    config,
+    stateNames: config.activeStates,
+  })
+
+export const fetchTerminalIssues = (config: LinearConfig) =>
+  fetchIssuesByStateNames({
+    config,
+    stateNames: config.terminalStates,
   })

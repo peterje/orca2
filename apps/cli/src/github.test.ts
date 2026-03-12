@@ -6,6 +6,7 @@ import {
   deriveAiReviewStatus,
   inspectIssueGitHubState,
   normalizeCheckSummary,
+  resolveHeadCommitCommittedAt,
 } from "./github"
 
 const baseIssue = {
@@ -341,5 +342,18 @@ describe("github inspection", () => {
       successfulCount: 1,
       totalCount: 3,
     })
+  })
+
+  it("falls back to the author timestamp when github omits the committer", () => {
+    expect(
+      resolveHeadCommitCommittedAt({
+        commit: {
+          author: {
+            date: "2026-03-11T12:00:00.000Z",
+          },
+          committer: null,
+        },
+      }),
+    ).toBe("2026-03-11T12:00:00.000Z")
   })
 })

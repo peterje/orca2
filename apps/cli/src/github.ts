@@ -98,9 +98,14 @@ const RawReviewCommentsSchema = Schema.Array(RawReviewCommentSchema)
 
 const RawCommitSchema = Schema.Struct({
   commit: Schema.Struct({
-    committer: Schema.Struct({
+    author: Schema.Struct({
       date: Schema.String,
     }),
+    committer: Schema.NullOr(
+      Schema.Struct({
+        date: Schema.String,
+      }),
+    ),
   }),
 })
 
@@ -154,6 +159,7 @@ type RawPullRequest = Schema.Schema.Type<typeof RawPullRequestSchema>
 type RawIssueComment = Schema.Schema.Type<typeof RawIssueCommentSchema>
 type RawReview = Schema.Schema.Type<typeof RawReviewSchema>
 type RawReviewComment = Schema.Schema.Type<typeof RawReviewCommentSchema>
+type RawCommit = Schema.Schema.Type<typeof RawCommitSchema>
 type CombinedStatusResponse = Schema.Schema.Type<
   typeof CombinedStatusResponseSchema
 >
@@ -646,6 +652,7 @@ const buildReviewThreads = (
       return {
         comments: normalizedComments,
         id: rootId,
+        // The REST review-comments endpoint does not expose thread resolution.
         isResolved: false,
         path: normalizedComments[0]?.path ?? null,
         updatedAt:
@@ -656,6 +663,9 @@ const buildReviewThreads = (
     })
     .sort((left, right) => compareIsoStrings(left.updatedAt, right.updatedAt))
 }
+
+export const resolveHeadCommitCommittedAt = (commit: RawCommit) =>
+  commit.commit.committer?.date ?? commit.commit.author.date
 
 const fetchPullRequestByNumber = (
   config: GitHubConfig,
@@ -919,7 +929,7 @@ const fetchHeadCommitCommittedAt = (
               message: `missing github commit metadata for ${pullRequest.owner}/${pullRequest.repo}@${pullRequest.headSha}`,
             }),
           )
-        : Effect.succeed(commit.commit.committer.date),
+        : Effect.succeed(resolveHeadCommitCommittedAt(commit)),
     ),
   )
 

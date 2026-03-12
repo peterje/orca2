@@ -52,7 +52,7 @@ const formatReviewThreads = (reviewContext: PullRequestReviewContext) =>
               : "  - none"
 
           return [
-            `- thread ${thread.id} on ${thread.path ?? "unknown file"} (${thread.isResolved ? "resolved" : "unresolved"}, updated ${thread.updatedAt})`,
+            `- thread ${thread.id} on ${thread.path ?? "unknown file"} (updated ${thread.updatedAt})`,
             comments,
           ].join("\n")
         })

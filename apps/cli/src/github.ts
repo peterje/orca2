@@ -1028,6 +1028,24 @@ const toReviewThreadSummary = (
   updatedAt: thread.updatedAt,
 })
 
+export const resolveReviewThreadsPage = ({
+  data,
+  pullRequest,
+}: {
+  readonly data: RawGraphqlReviewThreadsData
+  readonly pullRequest: PullRequest
+}) => {
+  const reviewThreadsPage = data.repository?.pullRequest?.reviewThreads ?? null
+
+  return reviewThreadsPage === null
+    ? Effect.fail(
+        new GitHubApiError({
+          message: `missing github review thread data for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+        }),
+      )
+    : Effect.succeed(reviewThreadsPage)
+}
+
 const fetchReviewThreads = (config: GitHubConfig, pullRequest: PullRequest) =>
   Effect.gen(function* () {
     const reviewThreads: Array<ReviewThreadSummary> = []
@@ -1058,13 +1076,10 @@ const fetchReviewThreads = (config: GitHubConfig, pullRequest: PullRequest) =>
         },
       )
 
-      const reviewThreadsPage =
-        data.repository?.pullRequest?.reviewThreads ?? null
-      if (reviewThreadsPage === null) {
-        return reviewThreads.sort((left, right) =>
-          compareIsoStrings(left.updatedAt, right.updatedAt),
-        )
-      }
+      const reviewThreadsPage = yield* resolveReviewThreadsPage({
+        data,
+        pullRequest,
+      })
 
       reviewThreads.push(...reviewThreadsPage.nodes.map(toReviewThreadSummary))
 
@@ -1310,6 +1325,7 @@ export const deriveHumanReviewStatus = ({
       headCommitCommittedAt !== null &&
       review.submittedAt !== null &&
       timestampAfter(review.submittedAt, headCommitCommittedAt) &&
+      (summon.length === 0 || !review.body.includes(summon)) &&
       (review.state === "CHANGES_REQUESTED" ||
         (review.state === "COMMENTED" && review.body.trim().length > 0)),
   ).length

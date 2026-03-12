@@ -8,6 +8,7 @@ import {
   inspectIssueGitHubState,
   normalizeCheckSummary,
   resolveHeadCommitCommittedAt,
+  resolveReviewThreadsPage,
 } from "./github"
 
 const baseIssue = {
@@ -497,6 +498,51 @@ describe("github inspection", () => {
     })
   })
 
+  it("does not treat summon-tagged review bodies as actionable human feedback", () => {
+    expect(
+      deriveHumanReviewStatus({
+        config: humanReviewConfig,
+        currentHeadSha: "def456",
+        headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+        issueComments: [],
+        previousHeadSha: "def456",
+        reviewThreads: [],
+        reviews: [
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "teammate",
+            body: "@greptileai please take another pass",
+            commitId: "def456",
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-2b",
+            id: "review-2b",
+            state: "COMMENTED",
+            submittedAt: "2026-03-11T12:06:00.000Z",
+          },
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "reviewer-2",
+            body: "approved",
+            commitId: "def456",
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-2c",
+            id: "review-2c",
+            state: "APPROVED",
+            submittedAt: "2026-03-11T12:07:00.000Z",
+          },
+        ],
+        summonComment: "@greptileai",
+      }),
+    ).toEqual({
+      actionableFeedbackCount: 0,
+      approvalCount: 1,
+      hasActionableFeedback: false,
+      hasFreshApproval: true,
+      isGreen: true,
+      unresolvedThreadCount: 0,
+    })
+  })
+
   it("treats new human feedback and unresolved threads as blocking", () => {
     expect(
       deriveHumanReviewStatus({
@@ -622,5 +668,23 @@ describe("github inspection", () => {
       isGreen: true,
       unresolvedThreadCount: 0,
     })
+  })
+
+  it("fails loudly when github omits review thread data for an open pr", async () => {
+    try {
+      await Effect.runPromise(
+        resolveReviewThreadsPage({
+          data: {
+            repository: null,
+          },
+          pullRequest: openPullRequest,
+        }),
+      )
+      throw new Error("expected review thread resolution to fail")
+    } catch (error) {
+      expect(error).toMatchObject({
+        message: "missing github review thread data for peterje/orca2#42",
+      })
+    }
   })
 })

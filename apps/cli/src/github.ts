@@ -78,23 +78,61 @@ const RawReviewSchema = Schema.Struct({
 
 const RawReviewsSchema = Schema.Array(RawReviewSchema)
 
-const RawReviewCommentSchema = Schema.Struct({
-  body: Schema.String,
-  commit_id: Schema.NullOr(Schema.String),
-  created_at: Schema.String,
-  html_url: Schema.String,
-  id: Schema.Number,
-  in_reply_to_id: Schema.NullOr(Schema.Number),
-  original_commit_id: Schema.NullOr(Schema.String),
-  path: Schema.NullOr(Schema.String),
-  user: Schema.NullOr(
+const RawGraphqlReviewThreadCommentSchema = Schema.Struct({
+  author: Schema.NullOr(
     Schema.Struct({
       login: Schema.String,
     }),
   ),
+  body: Schema.String,
+  commit: Schema.NullOr(
+    Schema.Struct({
+      oid: Schema.String,
+    }),
+  ),
+  createdAt: Schema.String,
+  id: Schema.String,
+  originalCommit: Schema.NullOr(
+    Schema.Struct({
+      oid: Schema.String,
+    }),
+  ),
+  path: Schema.NullOr(Schema.String),
+  replyTo: Schema.NullOr(
+    Schema.Struct({
+      id: Schema.String,
+    }),
+  ),
+  url: Schema.String,
 })
 
-const RawReviewCommentsSchema = Schema.Array(RawReviewCommentSchema)
+const RawGraphqlReviewThreadSchema = Schema.Struct({
+  comments: Schema.Struct({
+    nodes: Schema.Array(RawGraphqlReviewThreadCommentSchema),
+  }),
+  id: Schema.String,
+  isResolved: Schema.Boolean,
+  path: Schema.NullOr(Schema.String),
+  updatedAt: Schema.String,
+})
+
+const RawGraphqlReviewThreadsDataSchema = Schema.Struct({
+  repository: Schema.NullOr(
+    Schema.Struct({
+      pullRequest: Schema.NullOr(
+        Schema.Struct({
+          reviewThreads: Schema.Struct({
+            nodes: Schema.Array(RawGraphqlReviewThreadSchema),
+            pageInfo: Schema.Struct({
+              endCursor: Schema.NullOr(Schema.String),
+              hasNextPage: Schema.Boolean,
+            }),
+          }),
+        }),
+      ),
+    }),
+  ),
+})
 
 const RawCommitSchema = Schema.Struct({
   commit: Schema.Struct({
@@ -158,7 +196,12 @@ const CheckRunsResponseSchema = Schema.Struct({
 type RawPullRequest = Schema.Schema.Type<typeof RawPullRequestSchema>
 type RawIssueComment = Schema.Schema.Type<typeof RawIssueCommentSchema>
 type RawReview = Schema.Schema.Type<typeof RawReviewSchema>
-type RawReviewComment = Schema.Schema.Type<typeof RawReviewCommentSchema>
+type RawGraphqlReviewThread = Schema.Schema.Type<
+  typeof RawGraphqlReviewThreadSchema
+>
+type RawGraphqlReviewThreadsData = Schema.Schema.Type<
+  typeof RawGraphqlReviewThreadsDataSchema
+>
 type RawCommit = Schema.Schema.Type<typeof RawCommitSchema>
 type CombinedStatusResponse = Schema.Schema.Type<
   typeof CombinedStatusResponseSchema
@@ -176,6 +219,20 @@ export interface GitHubConfig {
   readonly repo: string
 }
 
+export interface HumanReviewConfig {
+  readonly requireApproval: boolean
+  readonly requireNoUnresolvedThreads: boolean
+}
+
+export interface HumanReviewStatus {
+  readonly actionableFeedbackCount: number
+  readonly approvalCount: number
+  readonly hasActionableFeedback: boolean
+  readonly hasFreshApproval: boolean
+  readonly isGreen: boolean
+  readonly unresolvedThreadCount: number
+}
+
 export type GitHubInspectionResult =
   | {
       readonly kind: "missing-pr"
@@ -191,6 +248,8 @@ export type GitHubInspectionResult =
       readonly associationSource: "linear" | "branch"
       readonly aiReviewStatus: AiReviewStatus | null
       readonly branchNames: ReadonlyArray<string>
+      readonly headCommitCommittedAt: string | null
+      readonly humanReviewStatus: HumanReviewStatus | null
       readonly pullRequest: PullRequest
       readonly headSha: string
       readonly reviewContext: PullRequestReviewContext
@@ -204,6 +263,8 @@ const githubCheckRunsPerPage = 100
 const githubReviewActivityPerPage = 100
 const maxCheckRunPages = 10
 const maxReviewActivityPages = 10
+const reviewThreadCommentsPerPage = 100
+const reviewThreadsPerPage = 100
 
 const toPullRequest = ({
   fallbackOwner,
@@ -397,6 +458,106 @@ const executeGithubJson = <A>(
     return payload
   }) as Effect.Effect<A | null, GitHubApiError, HttpClient.HttpClient>
 
+const executeGithubGraphqlData = <A>({
+  config,
+  description,
+  query,
+  schema,
+  variables,
+}: {
+  readonly config: GitHubConfig
+  readonly description: string
+  readonly query: string
+  readonly schema: Schema.Schema<A>
+  readonly variables: Record<string, unknown>
+}): Effect.Effect<A, GitHubApiError, HttpClient.HttpClient> =>
+  Effect.gen(function* () {
+    const httpClient = yield* HttpClient.HttpClient
+    const response = yield* httpClient
+      .execute(
+        HttpClientRequest.post(
+          new URL("/graphql", config.apiUrl).toString(),
+        ).pipe(
+          HttpClientRequest.acceptJson,
+          HttpClientRequest.bodyJsonUnsafe({
+            query,
+            variables,
+          }),
+          HttpClientRequest.setHeader(
+            "Authorization",
+            `Bearer ${config.token}`,
+          ),
+          HttpClientRequest.setHeader("Accept", githubAcceptHeader),
+          HttpClientRequest.setHeader("X-GitHub-Api-Version", githubApiVersion),
+        ),
+      )
+      .pipe(
+        Effect.mapError(
+          (error) =>
+            new GitHubApiError({
+              message: `github graphql request failed for ${description}: ${String(error)}`,
+            }),
+        ),
+      )
+
+    if (response.status < 200 || response.status >= 300) {
+      return yield* new GitHubApiError({
+        message: `github graphql request failed with status ${response.status} for ${description}`,
+      })
+    }
+
+    const payload = (yield* response.json.pipe(
+      Effect.mapError(
+        (error) =>
+          new GitHubApiError({
+            message: `github graphql returned invalid json for ${description}: ${String(error)}`,
+          }),
+      ),
+    )) as unknown
+
+    const payloadRecord =
+      typeof payload === "object" && payload !== null
+        ? (payload as Record<string, unknown>)
+        : null
+
+    const graphqlErrors = Array.isArray(payloadRecord?.errors)
+      ? payloadRecord.errors
+          .flatMap((error: unknown) => {
+            if (
+              typeof error === "object" &&
+              error !== null &&
+              "message" in error &&
+              typeof error.message === "string"
+            ) {
+              return [error.message]
+            }
+
+            return []
+          })
+          .filter((message: string) => message.length > 0)
+      : []
+    if (graphqlErrors.length > 0) {
+      return yield* new GitHubApiError({
+        message: `github graphql returned errors for ${description}: ${graphqlErrors.join("; ")}`,
+      })
+    }
+
+    if (payloadRecord === null || !("data" in payloadRecord)) {
+      return yield* new GitHubApiError({
+        message: `github graphql response omitted data for ${description}`,
+      })
+    }
+
+    return yield* Schema.decodeUnknownEffect(schema)(payloadRecord.data).pipe(
+      Effect.mapError(
+        (error) =>
+          new GitHubApiError({
+            message: `github graphql response schema mismatch for ${description}: ${String(error)}`,
+          }),
+      ),
+    )
+  }) as Effect.Effect<A, GitHubApiError, HttpClient.HttpClient>
+
 const pullRequestUrl = ({
   apiUrl,
   owner,
@@ -522,30 +683,6 @@ const reviewsUrl = ({
   return url.toString()
 }
 
-const reviewCommentsUrl = ({
-  apiUrl,
-  owner,
-  page = 1,
-  perPage = githubReviewActivityPerPage,
-  repo,
-  pullRequestNumber,
-}: {
-  readonly apiUrl: string
-  readonly owner: string
-  readonly page?: number
-  readonly perPage?: number
-  readonly repo: string
-  readonly pullRequestNumber: number
-}) => {
-  const url = new URL(
-    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullRequestNumber}/comments`,
-    apiUrl,
-  )
-  url.searchParams.set("page", String(page))
-  url.searchParams.set("per_page", String(perPage))
-  return url.toString()
-}
-
 const commitUrl = ({
   apiUrl,
   owner,
@@ -583,21 +720,6 @@ const toReviewSummary = (review: RawReview): ReviewSummary => ({
   submittedAt: review.submitted_at,
 })
 
-const toReviewThreadCommentSummary = (
-  comment: RawReviewComment,
-): ReviewThreadSummary["comments"][number] => ({
-  authorLogin: comment.user?.login ?? null,
-  body: comment.body,
-  commitId: comment.commit_id,
-  createdAt: comment.created_at,
-  htmlUrl: comment.html_url,
-  id: String(comment.id),
-  inReplyToId:
-    comment.in_reply_to_id === null ? null : String(comment.in_reply_to_id),
-  originalCommitId: comment.original_commit_id,
-  path: comment.path,
-})
-
 const compareIsoStrings = (left: string, right: string) =>
   new Date(left).getTime() - new Date(right).getTime()
 
@@ -605,64 +727,6 @@ const maxIsoString = (values: ReadonlyArray<string>) =>
   values.length === 0
     ? null
     : ([...values].sort(compareIsoStrings).at(-1) ?? null)
-
-const buildReviewThreads = (
-  comments: ReadonlyArray<RawReviewComment>,
-): PullRequestReviewContext["reviewThreads"] => {
-  const commentsById = new Map(
-    comments.map((comment) => [String(comment.id), comment] as const),
-  )
-  const grouped = new Map<string, Array<RawReviewComment>>()
-
-  const findRootId = (comment: RawReviewComment) => {
-    let current = comment
-    let nextReplyToId = current.in_reply_to_id
-
-    while (nextReplyToId !== null) {
-      const parent = commentsById.get(String(nextReplyToId))
-      if (parent === undefined) {
-        break
-      }
-
-      current = parent
-      nextReplyToId = current.in_reply_to_id
-    }
-
-    return String(current.id)
-  }
-
-  for (const comment of comments) {
-    const rootId = findRootId(comment)
-    const threadComments = grouped.get(rootId) ?? []
-    threadComments.push(comment)
-    grouped.set(rootId, threadComments)
-  }
-
-  return [...grouped.entries()]
-    .map(([rootId, threadComments]) => {
-      const normalizedComments = threadComments
-        .map(toReviewThreadCommentSummary)
-        .sort((left, right) =>
-          compareIsoStrings(left.createdAt, right.createdAt),
-        )
-      const updatedAt = maxIsoString(
-        normalizedComments.map((comment) => comment.createdAt),
-      )
-
-      return {
-        comments: normalizedComments,
-        id: rootId,
-        // The REST review-comments endpoint does not expose thread resolution.
-        isResolved: false,
-        path: normalizedComments[0]?.path ?? null,
-        updatedAt:
-          updatedAt ??
-          normalizedComments[0]?.createdAt ??
-          new Date(0).toISOString(),
-      } satisfies ReviewThreadSummary
-    })
-    .sort((left, right) => compareIsoStrings(left.updatedAt, right.updatedAt))
-}
 
 export const resolveHeadCommitCommittedAt = (commit: RawCommit) =>
   commit.commit.committer?.date ?? commit.commit.author.date
@@ -893,20 +957,133 @@ const fetchReviews = (config: GitHubConfig, pullRequest: PullRequest) =>
     ),
   )
 
+const reviewThreadsGraphqlQuery = `
+  query OrcaPullRequestReviewThreads(
+    $owner: String!
+    $repo: String!
+    $number: Int!
+    $after: String
+    $commentsFirst: Int!
+    $threadsFirst: Int!
+  ) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: $threadsFirst, after: $after) {
+          nodes {
+            comments(first: $commentsFirst) {
+              nodes {
+                author {
+                  login
+                }
+                body
+                commit {
+                  oid
+                }
+                createdAt
+                id
+                originalCommit {
+                  oid
+                }
+                path
+                replyTo {
+                  id
+                }
+                url
+              }
+            }
+            id
+            isResolved
+            path
+            updatedAt
+          }
+          pageInfo {
+            endCursor
+            hasNextPage
+          }
+        }
+      }
+    }
+  }
+`
+
+const toReviewThreadSummary = (
+  thread: RawGraphqlReviewThread,
+): ReviewThreadSummary => ({
+  comments: [...thread.comments.nodes]
+    .map((comment) => ({
+      authorLogin: comment.author?.login ?? null,
+      body: comment.body,
+      commitId: comment.commit?.oid ?? null,
+      createdAt: comment.createdAt,
+      htmlUrl: comment.url,
+      id: comment.id,
+      inReplyToId: comment.replyTo?.id ?? null,
+      originalCommitId: comment.originalCommit?.oid ?? null,
+      path: comment.path,
+    }))
+    .sort((left, right) => compareIsoStrings(left.createdAt, right.createdAt)),
+  id: thread.id,
+  isResolved: thread.isResolved,
+  path: thread.path,
+  updatedAt: thread.updatedAt,
+})
+
 const fetchReviewThreads = (config: GitHubConfig, pullRequest: PullRequest) =>
-  fetchPaginatedGithubCollection({
-    config,
-    description: `review comments for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
-    schema: RawReviewCommentsSchema,
-    urlForPage: (page) =>
-      reviewCommentsUrl({
-        apiUrl: config.apiUrl,
-        owner: pullRequest.owner,
-        page,
-        repo: pullRequest.repo,
-        pullRequestNumber: pullRequest.number,
-      }),
-  }).pipe(Effect.map(buildReviewThreads))
+  Effect.gen(function* () {
+    const reviewThreads: Array<ReviewThreadSummary> = []
+    let cursor: string | null = null
+    let page = 1
+
+    while (true) {
+      if (page > maxReviewActivityPages) {
+        return yield* new GitHubApiError({
+          message: `github review thread pagination exceeded ${maxReviewActivityPages} pages for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+        })
+      }
+
+      const data: RawGraphqlReviewThreadsData = yield* executeGithubGraphqlData(
+        {
+          config,
+          description: `review threads for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+          query: reviewThreadsGraphqlQuery,
+          schema: RawGraphqlReviewThreadsDataSchema,
+          variables: {
+            after: cursor,
+            commentsFirst: reviewThreadCommentsPerPage,
+            number: pullRequest.number,
+            owner: pullRequest.owner,
+            repo: pullRequest.repo,
+            threadsFirst: reviewThreadsPerPage,
+          },
+        },
+      )
+
+      const reviewThreadsPage =
+        data.repository?.pullRequest?.reviewThreads ?? null
+      if (reviewThreadsPage === null) {
+        return reviewThreads.sort((left, right) =>
+          compareIsoStrings(left.updatedAt, right.updatedAt),
+        )
+      }
+
+      reviewThreads.push(...reviewThreadsPage.nodes.map(toReviewThreadSummary))
+
+      if (!reviewThreadsPage.pageInfo.hasNextPage) {
+        return reviewThreads.sort((left, right) =>
+          compareIsoStrings(left.updatedAt, right.updatedAt),
+        )
+      }
+
+      cursor = reviewThreadsPage.pageInfo.endCursor
+      if (cursor === null) {
+        return yield* new GitHubApiError({
+          message: `github review thread pagination omitted endCursor for ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}`,
+        })
+      }
+
+      page += 1
+    }
+  })
 
 const fetchHeadCommitCommittedAt = (
   config: GitHubConfig,
@@ -1042,6 +1219,126 @@ export const deriveAiReviewStatus = ({
   }
 }
 
+const humanReviewStates = new Set([
+  "APPROVED",
+  "CHANGES_REQUESTED",
+  "COMMENTED",
+])
+
+const latestReviewsByAuthor = (reviews: ReadonlyArray<ReviewSummary>) => {
+  const latestByAuthor = new Map<string, ReviewSummary>()
+
+  for (const review of reviews) {
+    if (
+      review.authorLogin === null ||
+      review.submittedAt === null ||
+      !humanReviewStates.has(review.state)
+    ) {
+      continue
+    }
+
+    const current = latestByAuthor.get(review.authorLogin)
+    if (
+      current === undefined ||
+      compareIsoStrings(
+        current.submittedAt ?? new Date(0).toISOString(),
+        review.submittedAt,
+      ) <= 0
+    ) {
+      latestByAuthor.set(review.authorLogin, review)
+    }
+  }
+
+  return [...latestByAuthor.values()]
+}
+
+export const deriveHumanReviewStatus = ({
+  config,
+  currentHeadSha,
+  headCommitCommittedAt,
+  issueComments,
+  previousHeadSha,
+  reviewThreads,
+  reviews,
+  summonComment,
+}: {
+  readonly config: HumanReviewConfig
+  readonly currentHeadSha: string
+  readonly headCommitCommittedAt: string | null
+  readonly issueComments: ReadonlyArray<PullRequestCommentSummary>
+  readonly previousHeadSha?: string | null | undefined
+  readonly reviewThreads: ReadonlyArray<ReviewThreadSummary>
+  readonly reviews: ReadonlyArray<ReviewSummary>
+  readonly summonComment?: string | null | undefined
+}): HumanReviewStatus => {
+  const summon = summonComment?.trim() ?? ""
+  const latestHumanReviews = latestReviewsByAuthor(reviews)
+  const freshHeadApprovalReviews = latestHumanReviews.filter(
+    (review) =>
+      review.state === "APPROVED" && review.commitId === currentHeadSha,
+  )
+  const fallbackApprovalReviews = latestHumanReviews.filter(
+    (review) => review.state === "APPROVED" && review.commitId === null,
+  )
+  const headChanged =
+    previousHeadSha !== undefined &&
+    previousHeadSha !== null &&
+    previousHeadSha !== currentHeadSha
+  const hasFreshApproval =
+    freshHeadApprovalReviews.length > 0 ||
+    (!headChanged && fallbackApprovalReviews.length > 0)
+
+  const isActionableIssueComment = (comment: PullRequestCommentSummary) =>
+    headCommitCommittedAt !== null &&
+    timestampAfter(comment.createdAt, headCommitCommittedAt) &&
+    (summon.length === 0 || !comment.body.includes(summon))
+
+  const isActionableThreadComment = (
+    comment: ReviewThreadSummary["comments"][number],
+  ) =>
+    headCommitCommittedAt !== null &&
+    timestampAfter(comment.createdAt, headCommitCommittedAt) &&
+    (summon.length === 0 || !comment.body.includes(summon))
+
+  const actionableIssueCommentCount = issueComments.filter(
+    isActionableIssueComment,
+  ).length
+  const actionableThreadCommentCount = reviewThreads
+    .flatMap((thread) => thread.comments)
+    .filter(isActionableThreadComment).length
+  const actionableReviewCount = latestHumanReviews.filter(
+    (review) =>
+      headCommitCommittedAt !== null &&
+      review.submittedAt !== null &&
+      timestampAfter(review.submittedAt, headCommitCommittedAt) &&
+      (review.state === "CHANGES_REQUESTED" ||
+        (review.state === "COMMENTED" && review.body.trim().length > 0)),
+  ).length
+  const actionableFeedbackCount =
+    actionableIssueCommentCount +
+    actionableThreadCommentCount +
+    actionableReviewCount
+
+  const unresolvedThreadCount = config.requireNoUnresolvedThreads
+    ? reviewThreads.filter((thread) => !thread.isResolved).length
+    : 0
+
+  const isGreen =
+    (!config.requireApproval || hasFreshApproval) &&
+    (!config.requireNoUnresolvedThreads || unresolvedThreadCount === 0) &&
+    actionableFeedbackCount === 0
+
+  return {
+    actionableFeedbackCount,
+    approvalCount:
+      freshHeadApprovalReviews.length + fallbackApprovalReviews.length,
+    hasActionableFeedback: actionableFeedbackCount > 0,
+    hasFreshApproval,
+    isGreen,
+    unresolvedThreadCount,
+  }
+}
+
 const fetchReviewContext = (config: GitHubConfig, pullRequest: PullRequest) =>
   Effect.all({
     headCommitCommittedAt: fetchHeadCommitCommittedAt(config, pullRequest),
@@ -1122,6 +1419,7 @@ export const inspectIssueGitHubState = ({
   fetchReviewContext: fetchReviewContextImpl = fetchReviewContext,
   fetchPullRequestByNumber:
     fetchPullRequestByNumberImpl = fetchPullRequestByNumber,
+  humanReviewConfig,
   issue,
   listPullRequestsByBranch:
     listPullRequestsByBranchImpl = listPullRequestsByBranch,
@@ -1151,6 +1449,7 @@ export const inspectIssueGitHubState = ({
     config: GitHubConfig,
     ref: Pick<LinkedPullRequestRef, "owner" | "repo" | "number">,
   ) => Effect.Effect<PullRequest | null, GitHubApiError, HttpClient.HttpClient>
+  readonly humanReviewConfig: HumanReviewConfig
   readonly issue: NormalizedIssue
   readonly listPullRequestsByBranch?: (
     config: GitHubConfig,
@@ -1188,6 +1487,8 @@ export const inspectIssueGitHubState = ({
             branchNames,
             checkSummary,
             headSha: pullRequest.headSha,
+            headCommitCommittedAt: null,
+            humanReviewStatus: null,
             pullRequest,
             reviewContext: emptyReviewContext,
             reviewRoundCount: null,
@@ -1205,6 +1506,16 @@ export const inspectIssueGitHubState = ({
           reviews: reviewContext.reviews,
           summonComment,
         })
+        const humanReviewStatus = deriveHumanReviewStatus({
+          config: humanReviewConfig,
+          currentHeadSha: pullRequest.headSha,
+          headCommitCommittedAt,
+          issueComments: reviewContext.issueComments,
+          previousHeadSha: currentHeadSha,
+          reviewThreads: reviewContext.reviewThreads,
+          reviews: reviewContext.reviews,
+          summonComment,
+        })
 
         return {
           kind: "found-pr",
@@ -1213,6 +1524,8 @@ export const inspectIssueGitHubState = ({
           branchNames,
           checkSummary,
           headSha: pullRequest.headSha,
+          headCommitCommittedAt,
+          humanReviewStatus,
           pullRequest,
           reviewContext,
           reviewRoundCount: nextReviewRoundCount({

@@ -4,6 +4,7 @@ import type { PullRequest } from "./domain"
 import type { GitHubInspectionResult } from "./github"
 import {
   deriveAiReviewStatus,
+  deriveHumanReviewStatus,
   inspectIssueGitHubState,
   normalizeCheckSummary,
   resolveHeadCommitCommittedAt,
@@ -32,6 +33,11 @@ const githubConfig = {
   owner: "peterje",
   repo: "orca2",
   token: "github-token",
+} as const
+
+const humanReviewConfig = {
+  requireApproval: true,
+  requireNoUnresolvedThreads: true,
 } as const
 
 const openPullRequest: PullRequest = {
@@ -84,6 +90,7 @@ describe("github inspection", () => {
               reviews: [],
             },
           }),
+        humanReviewConfig,
         issue: {
           ...baseIssue,
           branchName: "some-other-branch",
@@ -134,6 +141,7 @@ describe("github inspection", () => {
             successfulCount: 0,
             totalCount: 2,
           }),
+        humanReviewConfig,
         issue: baseIssue,
         listPullRequestsByBranch: (_, branchName) => {
           branchLookups.push(branchName)
@@ -164,6 +172,8 @@ describe("github inspection", () => {
         totalCount: 2,
       },
       headSha: "def456",
+      headCommitCommittedAt: null,
+      humanReviewStatus: null,
       kind: "found-pr",
       pullRequest: {
         ...openPullRequest,
@@ -191,6 +201,7 @@ describe("github inspection", () => {
             ...openPullRequest,
             state: "closed",
           }),
+        humanReviewConfig,
         issue: {
           ...baseIssue,
           linkedPullRequests: [
@@ -384,6 +395,145 @@ describe("github inspection", () => {
       lastObservedReviewActivityAt: null,
       status: "not_requested",
       waitingSince: null,
+    })
+  })
+
+  it("requires a fresh approval after the head sha changes when approval freshness is ambiguous", () => {
+    expect(
+      deriveHumanReviewStatus({
+        config: humanReviewConfig,
+        currentHeadSha: "def456",
+        headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+        issueComments: [],
+        previousHeadSha: "abc123",
+        reviewThreads: [],
+        reviews: [
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "teammate",
+            body: "looks good",
+            commitId: null,
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-1",
+            id: "review-1",
+            state: "APPROVED",
+            submittedAt: "2026-03-11T12:06:00.000Z",
+          },
+        ],
+      }),
+    ).toEqual({
+      actionableFeedbackCount: 0,
+      approvalCount: 1,
+      hasActionableFeedback: false,
+      hasFreshApproval: false,
+      isGreen: false,
+      unresolvedThreadCount: 0,
+    })
+  })
+
+  it("marks human review green only with a current-head approval and no actionable feedback", () => {
+    expect(
+      deriveHumanReviewStatus({
+        config: humanReviewConfig,
+        currentHeadSha: "def456",
+        headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+        issueComments: [],
+        previousHeadSha: "def456",
+        reviewThreads: [],
+        reviews: [
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "teammate",
+            body: "approved",
+            commitId: "def456",
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-2",
+            id: "review-2",
+            state: "APPROVED",
+            submittedAt: "2026-03-11T12:06:00.000Z",
+          },
+        ],
+      }),
+    ).toEqual({
+      actionableFeedbackCount: 0,
+      approvalCount: 1,
+      hasActionableFeedback: false,
+      hasFreshApproval: true,
+      isGreen: true,
+      unresolvedThreadCount: 0,
+    })
+  })
+
+  it("treats new human feedback and unresolved threads as blocking", () => {
+    expect(
+      deriveHumanReviewStatus({
+        config: humanReviewConfig,
+        currentHeadSha: "def456",
+        headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+        issueComments: [
+          {
+            authorLogin: "teammate",
+            body: "please tighten this path",
+            createdAt: "2026-03-11T12:07:00.000Z",
+            htmlUrl: "https://github.com/peterje/orca2/pull/42#issuecomment-3",
+            id: "comment-3",
+          },
+        ],
+        previousHeadSha: "def456",
+        reviewThreads: [
+          {
+            comments: [
+              {
+                authorLogin: "teammate",
+                body: "still needs a regression test",
+                commitId: "def456",
+                createdAt: "2026-03-11T12:08:00.000Z",
+                htmlUrl:
+                  "https://github.com/peterje/orca2/pull/42#discussion_r2",
+                id: "thread-comment-2",
+                inReplyToId: null,
+                originalCommitId: "def456",
+                path: "src/index.ts",
+              },
+            ],
+            id: "thread-2",
+            isResolved: false,
+            path: "src/index.ts",
+            updatedAt: "2026-03-11T12:08:00.000Z",
+          },
+        ],
+        reviews: [
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "teammate",
+            body: "approved",
+            commitId: "def456",
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-4",
+            id: "review-4",
+            state: "APPROVED",
+            submittedAt: "2026-03-11T12:06:00.000Z",
+          },
+          {
+            authorAssociation: "MEMBER",
+            authorLogin: "reviewer-2",
+            body: "changes requested",
+            commitId: "def456",
+            htmlUrl:
+              "https://github.com/peterje/orca2/pull/42#pullrequestreview-5",
+            id: "review-5",
+            state: "CHANGES_REQUESTED",
+            submittedAt: "2026-03-11T12:09:00.000Z",
+          },
+        ],
+      }),
+    ).toEqual({
+      actionableFeedbackCount: 3,
+      approvalCount: 1,
+      hasActionableFeedback: true,
+      hasFreshApproval: true,
+      isGreen: false,
+      unresolvedThreadCount: 1,
     })
   })
 })

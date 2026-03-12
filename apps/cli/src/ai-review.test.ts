@@ -4,6 +4,7 @@ import {
   applyAiReviewDecision,
   emptyReviewContext,
   runAiReviewEvaluationAttempt,
+  runHumanFeedbackRemediationAttempt,
 } from "./ai-review"
 
 const issue = {
@@ -142,5 +143,49 @@ describe("ai review", () => {
       lastError: "The feedback conflicts and needs a human call. (head abc123)",
       nextState: "ManualIntervention",
     })
+  })
+
+  it("runs a dedicated human feedback remediation attempt", async () => {
+    const prompts: Array<string> = []
+
+    const result = await Effect.runPromise(
+      runHumanFeedbackRemediationAttempt({
+        config,
+        ensureWorktree: () =>
+          Effect.succeed({
+            branchName: "pet-47",
+            path: "/repo/.orca/worktrees/pet-47",
+            reused: true,
+          }),
+        issue,
+        pullRequest,
+        reviewContext: {
+          issueComments: [],
+          reviewThreads: [
+            {
+              comments: [],
+              id: "thread-1",
+              isResolved: false,
+              path: "src/index.ts",
+              updatedAt: "2026-03-11T12:05:00.000Z",
+            },
+          ],
+          reviews: [],
+        },
+        reviewRoundCount: 3,
+        runAgent: ({ prompt }) => {
+          prompts.push(prompt)
+          return Effect.void
+        },
+        sleep: () => Effect.void,
+      }),
+    )
+
+    expect(result).toEqual({
+      branchName: "pet-47",
+      worktreePath: "/repo/.orca/worktrees/pet-47",
+    })
+    expect(prompts[0]).toContain("Address human review feedback")
+    expect(prompts[0]).toContain("Unresolved review threads")
   })
 })

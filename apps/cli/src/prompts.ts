@@ -59,6 +59,35 @@ const formatReviewThreads = (reviewContext: PullRequestReviewContext) =>
         .join("\n")
     : "- none"
 
+const formatUnresolvedReviewThreads = (
+  reviewContext: PullRequestReviewContext,
+) => {
+  const unresolvedThreads = reviewContext.reviewThreads.filter(
+    (thread) => !thread.isResolved,
+  )
+
+  return unresolvedThreads.length > 0
+    ? unresolvedThreads
+        .map((thread) => {
+          const comments =
+            thread.comments.length > 0
+              ? thread.comments
+                  .map(
+                    (comment) =>
+                      `  - ${comment.authorLogin ?? "unknown"} at ${comment.createdAt}: ${comment.body}`,
+                  )
+                  .join("\n")
+              : "  - none"
+
+          return [
+            `- thread ${thread.id} on ${thread.path ?? "unknown file"} (updated ${thread.updatedAt})`,
+            comments,
+          ].join("\n")
+        })
+        .join("\n")
+    : "- none"
+}
+
 const formatPullRequestContext = (pullRequest: PullRequest) =>
   [
     `- pr: ${pullRequest.url}`,
@@ -179,6 +208,53 @@ export const buildAiReviewRemediationPrompt = ({
     "Instructions",
     "- work only in the current git worktree",
     "- address the substantive AI review feedback in the codebase",
+    "- run focused verification for the changes you make",
+    "- create or update the pull request before you finish",
+    "- request AI review using this repository's workflow conventions after updating the pull request",
+  ].join("\n")
+
+export const buildHumanFeedbackPrompt = ({
+  issue,
+  pullRequest,
+  reviewContext,
+  reviewRoundCount,
+}: {
+  readonly issue: NormalizedIssue
+  readonly pullRequest: PullRequest
+  readonly reviewContext: PullRequestReviewContext
+  readonly reviewRoundCount: number
+}) =>
+  [
+    `Address human review feedback for Linear issue ${issue.identifier}: ${issue.title}`,
+    "",
+    "Context",
+    `- identifier: ${issue.identifier}`,
+    `- title: ${issue.title}`,
+    `- review round: ${reviewRoundCount}`,
+    formatPullRequestContext(pullRequest),
+    "",
+    "Description",
+    issue.description?.trim() || "No description provided.",
+    "",
+    "Labels",
+    formatList(issue.labels),
+    "",
+    "Blockers",
+    formatBlockers(issue),
+    "",
+    "PR comments",
+    formatIssueComments(reviewContext),
+    "",
+    "Reviews",
+    formatReviews(reviewContext),
+    "",
+    "Unresolved review threads",
+    formatUnresolvedReviewThreads(reviewContext),
+    "",
+    "Instructions",
+    "- work only in the current git worktree",
+    "- address the human review feedback in the codebase",
+    "- resolve or respond to unresolved review threads where the code change warrants it",
     "- run focused verification for the changes you make",
     "- create or update the pull request before you finish",
     "- request AI review using this repository's workflow conventions after updating the pull request",

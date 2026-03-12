@@ -69,6 +69,15 @@ const foundPullRequestInspection = (
     totalCount: 3,
   },
   headSha: pullRequest.headSha,
+  headCommitCommittedAt: "2026-03-11T12:05:00.000Z",
+  humanReviewStatus: {
+    actionableFeedbackCount: 0,
+    approvalCount: 0,
+    hasActionableFeedback: false,
+    hasFreshApproval: false,
+    isGreen: false,
+    unresolvedThreadCount: 0,
+  },
   kind: "found-pr" as const,
   pullRequest,
   reviewContext: emptyReviewContext,
@@ -278,7 +287,7 @@ describe("orchestrator", () => {
     expect(nextState.get(issue.id)?.currentHeadSha).toBe("draft456")
   })
 
-  it("does not regress downstream review states during github reconciliation", () => {
+  it("re-enters ai review when the pr head changes during human review", () => {
     const nextState = updateIssueStateForGitHubInspection({
       issue,
       issueStates: new Map([
@@ -320,8 +329,114 @@ describe("orchestrator", () => {
       }),
     })
 
-    expect(nextState.get(issue.id)?.state).toBe("WaitingForHumanReview")
-    expect(nextState.get(issue.id)?.currentHeadSha).toBe("def456")
+    expect(nextState.get(issue.id)?.state).toBe("EvaluatingAiReview")
+    expect(nextState.get(issue.id)?.currentHeadSha).toBe("updated-sha")
+  })
+
+  it("moves waiting human review into ready for merge once approvals are fresh", () => {
+    const nextState = updateIssueStateForGitHubInspection({
+      issue,
+      issueStates: new Map([
+        [
+          issue.id,
+          issueState({
+            aiReviewRoundCount: 2,
+            branchName: "pet-47",
+            checkSummary: {
+              failedCount: 0,
+              pendingCount: 0,
+              status: "passed",
+              successfulCount: 3,
+              totalCount: 3,
+            },
+            currentHeadSha: "def456",
+            currentPullRequest: {
+              ...pullRequest,
+              headSha: "def456",
+            },
+            state: "WaitingForHumanReview",
+            worktreePath: "/repo/.orca/worktrees/pet-47",
+          }),
+        ],
+      ]),
+      inspection: foundPullRequestInspection({
+        aiReviewStatus: {
+          headSha: "def456",
+          lastObservedReviewActivityAt: "2026-03-11T12:10:00.000Z",
+          status: "completed",
+          waitingSince: "2026-03-11T12:08:00.000Z",
+        },
+        headSha: "def456",
+        humanReviewStatus: {
+          actionableFeedbackCount: 0,
+          approvalCount: 1,
+          hasActionableFeedback: false,
+          hasFreshApproval: true,
+          isGreen: true,
+          unresolvedThreadCount: 0,
+        },
+        pullRequest: {
+          ...pullRequest,
+          headSha: "def456",
+        },
+        reviewRoundCount: 2,
+      }),
+    })
+
+    expect(nextState.get(issue.id)?.state).toBe("ReadyForMerge")
+  })
+
+  it("wakes ready for merge when new human feedback appears", () => {
+    const nextState = updateIssueStateForGitHubInspection({
+      issue,
+      issueStates: new Map([
+        [
+          issue.id,
+          issueState({
+            aiReviewRoundCount: 2,
+            branchName: "pet-47",
+            checkSummary: {
+              failedCount: 0,
+              pendingCount: 0,
+              status: "passed",
+              successfulCount: 3,
+              totalCount: 3,
+            },
+            currentHeadSha: "def456",
+            currentPullRequest: {
+              ...pullRequest,
+              headSha: "def456",
+            },
+            state: "ReadyForMerge",
+            worktreePath: "/repo/.orca/worktrees/pet-47",
+          }),
+        ],
+      ]),
+      inspection: foundPullRequestInspection({
+        aiReviewStatus: {
+          headSha: "def456",
+          lastObservedReviewActivityAt: "2026-03-11T12:10:00.000Z",
+          status: "completed",
+          waitingSince: "2026-03-11T12:08:00.000Z",
+        },
+        headSha: "def456",
+        humanReviewStatus: {
+          actionableFeedbackCount: 1,
+          approvalCount: 1,
+          hasActionableFeedback: true,
+          hasFreshApproval: true,
+          isGreen: false,
+          unresolvedThreadCount: 0,
+        },
+        pullRequest: {
+          ...pullRequest,
+          headSha: "def456",
+        },
+        reviewRoundCount: 2,
+      }),
+    })
+
+    expect(nextState.get(issue.id)?.state).toBe("AddressingHumanFeedback")
   })
 
   it("returns to waiting for pr when a branch-associated pr disappears", () => {

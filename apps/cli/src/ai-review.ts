@@ -13,6 +13,7 @@ import type { OrcaConfig } from "./orca-config"
 import {
   buildAiReviewEvaluationPrompt,
   buildAiReviewRemediationPrompt,
+  buildHumanFeedbackPrompt,
 } from "./prompts"
 
 const parseAiReviewDecision = (rawOutput: string) =>
@@ -168,6 +169,69 @@ export const runAiReviewRemediationAttempt = ({
     yield* runAgent({
       cwd: worktree.path,
       prompt: buildAiReviewRemediationPrompt({
+        issue,
+        pullRequest,
+        reviewContext,
+        reviewRoundCount,
+      }),
+    })
+
+    yield* sleep()
+
+    return {
+      branchName: worktree.branchName,
+      worktreePath: worktree.path,
+    } as const
+  })
+
+export const runHumanFeedbackRemediationAttempt = ({
+  config,
+  ensureWorktree = (currentIssue: NormalizedIssue) =>
+    ensureReviewWorktree({
+      config,
+      issue: currentIssue,
+    }),
+  issue,
+  onWorktreeReady = () => Effect.void,
+  pullRequest,
+  reviewContext,
+  reviewRoundCount,
+  runAgent = ({
+    cwd,
+    prompt,
+  }: {
+    readonly cwd: string
+    readonly prompt: string
+  }) =>
+    runOpencodeAgentText({
+      config,
+      cwd,
+      prompt,
+    }).pipe(Effect.asVoid),
+  sleep = () => Effect.sleep(Duration.millis(1_000)),
+}: {
+  readonly config: OrcaConfig
+  readonly ensureWorktree?: (
+    issue: NormalizedIssue,
+  ) => Effect.Effect<WorktreeHandle, WorktreeError>
+  readonly issue: NormalizedIssue
+  readonly onWorktreeReady?: (worktree: WorktreeHandle) => Effect.Effect<void>
+  readonly pullRequest: PullRequest
+  readonly reviewContext: PullRequestReviewContext
+  readonly reviewRoundCount: number
+  readonly runAgent?: (params: {
+    readonly cwd: string
+    readonly prompt: string
+  }) => Effect.Effect<void, AgentRunnerError>
+  readonly sleep?: () => Effect.Effect<void>
+}) =>
+  Effect.gen(function* () {
+    const worktree = yield* ensureWorktree(issue)
+    yield* onWorktreeReady(worktree)
+
+    yield* runAgent({
+      cwd: worktree.path,
+      prompt: buildHumanFeedbackPrompt({
         issue,
         pullRequest,
         reviewContext,

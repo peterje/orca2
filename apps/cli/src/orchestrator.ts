@@ -4,6 +4,7 @@ import {
   emptyReviewContext,
   runAiReviewEvaluationAttempt,
   runAiReviewRemediationAttempt,
+  runHumanFeedbackRemediationAttempt,
 } from "./ai-review"
 import { AgentRunnerError } from "./agent-runner"
 import type {
@@ -121,7 +122,8 @@ const isRunnableIssueState = (
   return (
     issueState.state === "Todo" ||
     issueState.state === "EvaluatingAiReview" ||
-    issueState.state === "AddressingAiReviewFeedback"
+    issueState.state === "AddressingAiReviewFeedback" ||
+    issueState.state === "AddressingHumanFeedback"
   )
 }
 
@@ -236,12 +238,8 @@ const findIssue = (
   issueId: string,
 ): NormalizedIssue | undefined => issues.find((issue) => issue.id === issueId)
 
-const downstreamGitHubStates = new Set<OrcaIssueState>([
-  "AddressingAiReviewFeedback",
-  "AddressingHumanFeedback",
-  "EvaluatingAiReview",
+const humanReviewHoldingStates = new Set<OrcaIssueState>([
   "ReadyForMerge",
-  "Released",
   "WaitingForHumanReview",
 ])
 
@@ -255,19 +253,17 @@ export const updateIssueStateForGitHubInspection = ({
   readonly inspection: GitHubInspectionResult
 }): IssueStateMap => {
   const currentIssueState = issueStates.get(issue.id)
-  if (
-    currentIssueState !== undefined &&
-    downstreamGitHubStates.has(currentIssueState.state)
-  ) {
-    return issueStates
-  }
 
   if (inspection.kind === "missing-pr") {
     if (
       currentIssueState === undefined ||
-      !["WaitingForAiReview", "WaitingForCi", "WaitingForPr"].includes(
-        currentIssueState.state,
-      )
+      ![
+        "ReadyForMerge",
+        "WaitingForAiReview",
+        "WaitingForCi",
+        "WaitingForHumanReview",
+        "WaitingForPr",
+      ].includes(currentIssueState.state)
     ) {
       return issueStates
     }
@@ -326,11 +322,22 @@ export const updateIssueStateForGitHubInspection = ({
       })
     }
 
-    const nextState: OrcaIssueState = inspection.pullRequest.isDraft
-      ? "WaitingForCi"
-      : inspection.aiReviewStatus?.status === "completed"
-        ? "EvaluatingAiReview"
-        : "WaitingForAiReview"
+    const sameHeadAsTracked =
+      currentIssueState?.currentHeadSha === inspection.headSha
+    const nextState: OrcaIssueState =
+      sameHeadAsTracked &&
+      currentIssueState !== undefined &&
+      humanReviewHoldingStates.has(currentIssueState.state)
+        ? inspection.humanReviewStatus?.hasActionableFeedback
+          ? "AddressingHumanFeedback"
+          : inspection.humanReviewStatus?.isGreen
+            ? "ReadyForMerge"
+            : "WaitingForHumanReview"
+        : inspection.pullRequest.isDraft
+          ? "WaitingForCi"
+          : inspection.aiReviewStatus?.status === "completed"
+            ? "EvaluatingAiReview"
+            : "WaitingForAiReview"
 
     return updateIssueState(issueStates, issue, {
       aiReviewRoundCount:
@@ -367,7 +374,9 @@ export const updateIssueStateForGitHubInspection = ({
 }
 
 const statesThatSkipGitHubReconciliation = new Set<OrcaIssueState>([
-  ...downstreamGitHubStates,
+  "AddressingAiReviewFeedback",
+  "AddressingHumanFeedback",
+  "EvaluatingAiReview",
   "Implementing",
   "ManualIntervention",
   "RetryQueued",
@@ -375,11 +384,13 @@ const statesThatSkipGitHubReconciliation = new Set<OrcaIssueState>([
 
 const reconcileIssuesWithGitHub = ({
   config,
+  humanReviewConfig,
   issues,
   issueStates,
   summonComment,
 }: {
   readonly config: OrcaConfig["github"]
+  readonly humanReviewConfig: OrcaConfig["humanReview"]
   readonly issues: ReadonlyArray<NormalizedIssue>
   readonly issueStates: IssueStateMap
   readonly summonComment: string
@@ -402,6 +413,7 @@ const reconcileIssuesWithGitHub = ({
         currentAiReviewStatus: currentIssueState?.aiReviewStatus,
         currentHeadSha: currentIssueState?.currentHeadSha,
         currentReviewRoundCount: currentIssueState?.aiReviewRoundCount,
+        humanReviewConfig,
         issue,
         summonComment,
         trackedBranchName: currentIssueState?.branchName,
@@ -604,7 +616,8 @@ export const runOrchestrator = ({
         const currentIssueState = (yield* Ref.get(issueStatesRef)).get(issue.id)
         const dispatchState: IssueExecutionState["state"] =
           currentIssueState?.state === "EvaluatingAiReview" ||
-          currentIssueState?.state === "AddressingAiReviewFeedback"
+          currentIssueState?.state === "AddressingAiReviewFeedback" ||
+          currentIssueState?.state === "AddressingHumanFeedback"
             ? currentIssueState.state
             : "Implementing"
 
@@ -782,27 +795,73 @@ export const runOrchestrator = ({
                     ),
                   )
                 })()
-              : runImplementationAttempt({
-                  config,
-                  issue,
-                  onWorktreeReady: (worktree) =>
-                    trackWorktree("Implementing", worktree),
-                }).pipe(
-                  Effect.flatMap((outcome) =>
-                    Ref.get(activeIssuesRef).pipe(
-                      Effect.flatMap((activeIssues) =>
-                        Ref.update(issueStatesRef, (currentIssueStates) =>
-                          applyImplementationOutcome({
-                            activeIssues,
-                            issue,
-                            issueStates: currentIssueStates,
-                            outcome,
-                          }),
+              : dispatchState === "AddressingHumanFeedback"
+                ? (() => {
+                    if (
+                      currentIssueState?.currentPullRequest === null ||
+                      currentIssueState?.currentPullRequest === undefined
+                    ) {
+                      return Effect.fail(
+                        new AgentRunnerError({
+                          diagnostics: [],
+                          message: `missing pull request context for ${issue.identifier} human feedback remediation`,
+                          reason: "protocol-error",
+                          retryable: false,
+                        }),
+                      )
+                    }
+
+                    return runHumanFeedbackRemediationAttempt({
+                      config,
+                      issue,
+                      onWorktreeReady: (worktree) =>
+                        trackWorktree("AddressingHumanFeedback", worktree),
+                      pullRequest: currentIssueState.currentPullRequest,
+                      reviewContext: currentIssueState.reviewContext,
+                      reviewRoundCount:
+                        currentIssueState.aiReviewRoundCount ?? 1,
+                    }).pipe(
+                      Effect.flatMap((outcome) =>
+                        Ref.get(activeIssuesRef).pipe(
+                          Effect.flatMap((activeIssues) =>
+                            Ref.update(issueStatesRef, (currentIssueStates) =>
+                              applyImplementationOutcome({
+                                activeIssues,
+                                issue,
+                                issueStates: currentIssueStates,
+                                outcome: {
+                                  branchName: outcome.branchName,
+                                  state: "WaitingForPr",
+                                  worktreePath: outcome.worktreePath,
+                                },
+                              }),
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                  })()
+                : runImplementationAttempt({
+                    config,
+                    issue,
+                    onWorktreeReady: (worktree) =>
+                      trackWorktree("Implementing", worktree),
+                  }).pipe(
+                    Effect.flatMap((outcome) =>
+                      Ref.get(activeIssuesRef).pipe(
+                        Effect.flatMap((activeIssues) =>
+                          Ref.update(issueStatesRef, (currentIssueStates) =>
+                            applyImplementationOutcome({
+                              activeIssues,
+                              issue,
+                              issueStates: currentIssueStates,
+                              outcome,
+                            }),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                )
+                  )
 
         yield* runDispatchedAttempt.pipe(
           Effect.flatMap((outcome) =>
@@ -922,6 +981,7 @@ export const runOrchestrator = ({
           )
           const githubReconciledIssueStates = yield* reconcileIssuesWithGitHub({
             config: config.github,
+            humanReviewConfig: config.humanReview,
             issues: issues.filter(
               (issue) => issue.normalizedState !== "terminal",
             ),
